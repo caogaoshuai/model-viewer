@@ -66,10 +66,3 @@ mad diff baseline.json /path/to/model --format json --fail-on-change
 | 结构 Diff | exact / dtype / shape / left-only / right-only |
 | Fuzzy 对账 | qkv fuse、gate/up fuse、tied embedding、量化辅助 tensor |
 | 输出格式 | term / markdown / mermaid / draw.io XML / html / json |
-
-## 关联项目
-
-- **训练资源估算**：`/Users/cgs/Documents/project/training-resource-estimator/`
-  - 借用其 config 解析、显存估算公式
-- **闭源模型上架协作**：`dashscope/dashscope-finetune/docs/closed-source-model-onboarding-collaboration.md`
-  - 一线协作场景源头
