@@ -177,6 +177,7 @@ def _snapshot_from_parts(
         warnings.append("No tensor metadata found; synthesized a structural tensor list from config.json.")
 
     tensors = [_classify_tensor(tensor) for tensor in tensors]
+    profile = _augment_profile_from_tensors(profile, tensors)
     return ModelSnapshot(
         name=name,
         source=source,
@@ -264,6 +265,13 @@ def _read_safetensors_file(path: Path) -> List[TensorInfo]:
 def _load_profile(config_path: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     estimator_profile = _try_training_resource_estimator(config_path)
     if estimator_profile is not None:
+        estimator_profile.setdefault(
+            "layer_kinds_source",
+            _layer_kinds_source(
+                _get_config_attr(config, "layer_types"),
+                _first_config_attr(config, ("full_attention_interval",)) or 0,
+            ),
+        )
         estimator_profile["profile_source"] = "training-resource-estimator"
         return estimator_profile
     profile = _fallback_profile(config)
@@ -324,7 +332,8 @@ def _fallback_profile(config: Dict[str, Any]) -> Dict[str, Any]:
     mtp_num_layers = _first_config_attr(config, ("mtp_num_hidden_layers", "mtp_num_layers")) or 0
     vision_config = config.get("vision_config") if isinstance(config.get("vision_config"), dict) else {}
     model_type = str(config.get("model_type") or "").lower()
-    kinds = _layer_kinds(int(layers or 0), layer_types)
+    kinds = _layer_kinds(int(layers or 0), layer_types, full_attention_interval=full_attention_interval)
+    kind_source = _layer_kinds_source(layer_types, full_attention_interval)
     total = _estimate_total_params(
         hidden=int(hidden or 0),
         intermediate=int(intermediate or 0),
@@ -361,6 +370,7 @@ def _fallback_profile(config: Dict[str, Any]) -> Dict[str, Any]:
         "num_standard_attn_layers": sum(1 for kind in kinds if kind != "linear_attention"),
         "num_kv_cache_layers": sum(1 for kind in kinds if kind != "linear_attention"),
         "layer_kinds": kinds,
+        "layer_kinds_source": kind_source,
         "full_attention_interval": int(full_attention_interval or 0),
         "linear_conv_kernel_dim": int(linear_conv_kernel_dim or 0),
         "linear_key_head_dim": int(linear_key_head_dim or 0),
@@ -446,7 +456,11 @@ def _get_config_attr(config: Any, attr_name: str, parent_key: Optional[str] = No
     return None
 
 
-def _layer_kinds(num_layers: int, layer_types: Any) -> List[str]:
+def _layer_kinds(
+    num_layers: int,
+    layer_types: Any,
+    full_attention_interval: Any = 0,
+) -> List[str]:
     if isinstance(layer_types, list) and layer_types:
         kinds = [
             "linear_attention" if ("linear" in str(item).lower() or "delta" in str(item).lower()) else "full_attention"
@@ -455,7 +469,21 @@ def _layer_kinds(num_layers: int, layer_types: Any) -> List[str]:
         if len(kinds) < num_layers:
             kinds.extend(["full_attention"] * (num_layers - len(kinds)))
         return kinds[:num_layers]
+    interval = int(full_attention_interval or 0)
+    if interval > 1 and num_layers:
+        return [
+            "full_attention" if (idx + 1) % interval == 0 else "linear_attention"
+            for idx in range(num_layers)
+        ]
     return ["full_attention"] * num_layers
+
+
+def _layer_kinds_source(layer_types: Any, full_attention_interval: Any = 0) -> str:
+    if isinstance(layer_types, list) and layer_types:
+        return "layer_types"
+    if int(full_attention_interval or 0) > 1:
+        return "full_attention_interval"
+    return "unspecified"
 
 
 def _synthesize_tensors(profile: Dict[str, Any], config: Dict[str, Any]) -> List[TensorInfo]:
@@ -471,22 +499,47 @@ def _synthesize_tensors(profile: Dict[str, Any], config: Dict[str, Any]) -> List
     tie = bool(profile.get("tie_word_embeddings"))
     dtype = _infer_config_dtype(config)
     linear_dtype = _infer_linear_dtype(config, dtype)
+    layer_kinds = list(profile.get("layer_kinds") or ["full_attention"] * layers)
+    if len(layer_kinds) < layers:
+        layer_kinds.extend(["full_attention"] * (layers - len(layer_kinds)))
+    linear_key_heads = int(profile.get("linear_num_key_heads") or 0)
+    linear_value_heads = int(profile.get("linear_num_value_heads") or 0)
+    linear_key_dim = int(profile.get("linear_key_head_dim") or 0)
+    linear_value_dim = int(profile.get("linear_value_head_dim") or 0)
+    linear_qk_dim = linear_key_heads * linear_key_dim
+    linear_v_dim = linear_value_heads * linear_value_dim
+    linear_qkv_dim = 2 * linear_qk_dim + linear_v_dim
 
     tensors = [
         _tensor("model.embed_tokens.weight", (vocab, hidden), dtype, "synthetic"),
     ]
     for idx in range(layers):
         prefix = f"model.layers.{idx}"
-        tensors.extend(
-            [
-                _tensor(f"{prefix}.input_layernorm.weight", (hidden,), dtype, "synthetic"),
-                _tensor(f"{prefix}.self_attn.q_proj.weight", (q_dim, hidden), linear_dtype, "synthetic"),
-                _tensor(f"{prefix}.self_attn.k_proj.weight", (kv_dim, hidden), linear_dtype, "synthetic"),
-                _tensor(f"{prefix}.self_attn.v_proj.weight", (kv_dim, hidden), linear_dtype, "synthetic"),
-                _tensor(f"{prefix}.self_attn.o_proj.weight", (hidden, q_dim), linear_dtype, "synthetic"),
-                _tensor(f"{prefix}.post_attention_layernorm.weight", (hidden,), dtype, "synthetic"),
-            ]
-        )
+        tensors.append(_tensor(f"{prefix}.input_layernorm.weight", (hidden,), dtype, "synthetic"))
+        if idx < len(layer_kinds) and layer_kinds[idx] == "linear_attention" and linear_qkv_dim and linear_v_dim:
+            tensors.extend(
+                [
+                    _tensor(f"{prefix}.linear_attn.in_proj_qkv.weight", (linear_qkv_dim, hidden), linear_dtype, "synthetic"),
+                    _tensor(f"{prefix}.linear_attn.in_proj_a.weight", (linear_value_heads, hidden), linear_dtype, "synthetic"),
+                    _tensor(f"{prefix}.linear_attn.in_proj_b.weight", (linear_value_heads, hidden), linear_dtype, "synthetic"),
+                    _tensor(f"{prefix}.linear_attn.in_proj_z.weight", (linear_v_dim, hidden), linear_dtype, "synthetic"),
+                    _tensor(f"{prefix}.linear_attn.conv1d.weight", (linear_qkv_dim,), linear_dtype, "synthetic"),
+                    _tensor(f"{prefix}.linear_attn.A_log", (linear_value_heads,), dtype, "synthetic"),
+                    _tensor(f"{prefix}.linear_attn.dt_bias", (linear_value_heads,), dtype, "synthetic"),
+                    _tensor(f"{prefix}.linear_attn.norm.weight", (linear_value_heads,), dtype, "synthetic"),
+                    _tensor(f"{prefix}.linear_attn.out_proj.weight", (hidden, linear_v_dim), linear_dtype, "synthetic"),
+                ]
+            )
+        else:
+            tensors.extend(
+                [
+                    _tensor(f"{prefix}.self_attn.q_proj.weight", (q_dim, hidden), linear_dtype, "synthetic"),
+                    _tensor(f"{prefix}.self_attn.k_proj.weight", (kv_dim, hidden), linear_dtype, "synthetic"),
+                    _tensor(f"{prefix}.self_attn.v_proj.weight", (kv_dim, hidden), linear_dtype, "synthetic"),
+                    _tensor(f"{prefix}.self_attn.o_proj.weight", (hidden, q_dim), linear_dtype, "synthetic"),
+                ]
+            )
+        tensors.append(_tensor(f"{prefix}.post_attention_layernorm.weight", (hidden,), dtype, "synthetic"))
         if int(profile.get("num_experts") or 0) and int(profile.get("moe_intermediate_size") or 0):
             experts = int(profile.get("num_experts") or 0)
             moe_i = int(profile.get("moe_intermediate_size") or 0)
@@ -516,6 +569,62 @@ def _synthesize_tensors(profile: Dict[str, Any], config: Dict[str, Any]) -> List
 
 def _tensor(name: str, shape: Tuple[int, ...], dtype: str, source: str) -> TensorInfo:
     return TensorInfo(name=name, shape=shape, dtype=normalize_dtype(dtype), source=source)
+
+
+def _augment_profile_from_tensors(profile: Dict[str, Any], tensors: Sequence[TensorInfo]) -> Dict[str, Any]:
+    if not profile or profile.get("layer_kinds_source") in {"layer_types", "full_attention_interval"}:
+        return profile
+    existing_kinds = profile.get("layer_kinds")
+    if isinstance(existing_kinds, list) and any(_is_linear_layer_kind(kind) for kind in existing_kinds):
+        return profile
+
+    layers = int(profile.get("num_hidden_layers") or 0)
+    if not layers:
+        layers = max((_main_layer_index(tensor.name) or -1) for tensor in tensors) + 1 if tensors else 0
+    if not layers:
+        return profile
+
+    linear_layers = {
+        int(layer)
+        for tensor in tensors
+        for layer in [_main_layer_index(tensor.name)]
+        if layer is not None and (".linear_attn." in tensor.name or ".delta_attn." in tensor.name)
+    }
+    full_layers = {
+        int(layer)
+        for tensor in tensors
+        for layer in [_main_layer_index(tensor.name)]
+        if layer is not None and ".self_attn." in tensor.name
+    }
+    if not linear_layers:
+        return profile
+
+    kinds = []
+    for idx in range(layers):
+        if idx in linear_layers:
+            kinds.append("linear_attention")
+        elif idx in full_layers:
+            kinds.append("full_attention")
+        else:
+            kinds.append("full_attention")
+
+    updated = dict(profile)
+    updated["layer_kinds"] = kinds
+    updated["layer_kinds_source"] = "tensor_keys"
+    updated["num_linear_attn_layers"] = sum(1 for kind in kinds if kind == "linear_attention")
+    updated["num_standard_attn_layers"] = sum(1 for kind in kinds if kind != "linear_attention")
+    updated["num_kv_cache_layers"] = updated["num_standard_attn_layers"]
+    return updated
+
+
+def _is_linear_layer_kind(kind: Any) -> bool:
+    value = str(kind).lower()
+    return "linear" in value or "delta" in value
+
+
+def _main_layer_index(name: str) -> Optional[int]:
+    match = re.search(r"(?:^model\.layers|\.language_model\.layers)\.(\d+)(?:\.|$)", name)
+    return int(match.group(1)) if match else None
 
 
 def _infer_config_dtype(config: Dict[str, Any]) -> str:

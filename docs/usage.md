@@ -41,6 +41,14 @@ python3 -m pip install -e '.[hub]'
 - 关心真实权重 key、dtype、单 tensor shape 时，传模型目录或 `.safetensors`。
 - 只有 index 没有 shard 时，适合做 key 集合检查；结构报告建议直接传 `config.json`。
 
+混合层类型的数据来源优先级：
+
+1. `config.json` 中的 `layer_types`，包括 `text_config.layer_types`。
+2. `config.json` 中的 `full_attention_interval`，包括 `text_config.full_attention_interval`。
+3. safetensors 或 index 中真实存在的主语言层 key，例如 `model.language_model.layers.0.linear_attn.*` 和 `model.language_model.layers.3.self_attn.*`。
+
+工具不会只因为 `model_type=qwen3_5_moe` 或模型名字里包含 Qwen3.5/Qwen3.6 就推断混合结构。如果缺少上述信息，`blocks` 会显示 `LAYER TYPE METADATA MISSING`，提醒补齐 `config.json` 或 safetensors index。
+
 ## 3. 展示单模型
 
 输出 Markdown 报告：
@@ -61,7 +69,7 @@ mad show /path/to/model --view overview --format mermaid
 mad show /path/to/model --view detail --layer 0 --format markdown
 ```
 
-对 Qwen3.5，`detail` 会按 `layer_types` 判断当前层类型：例如 `--layer 0` 展示 `DeltaNet / linear_attention`、`linear_attn.in_proj_qkv`、`State Cache`；`--layer 3` 展示 `GQA / full_attention`、`q/k/v/o_proj`、`RoPE`、`KV Cache` 和 `O(T^2)` 工作区。
+对 Qwen3.5，`detail` 会按 `layer_types`、`full_attention_interval` 或真实 `linear_attn/self_attn` key 判断当前层类型：例如 `--layer 0` 展示 `DeltaNet / linear_attention`、`linear_attn.in_proj_qkv`、`State Cache`；`--layer 3` 展示 `GQA / full_attention`、`q/k/v/o_proj`、`RoPE`、`KV Cache` 和 `O(T^2)` 工作区。
 
 导出 draw.io XML：
 
@@ -126,7 +134,7 @@ LANGUAGE DECODER STACK x 28
 
 对 MoE 模型，MLP 区域会显示 router、expert 数和 active expert 数。
 
-对 Qwen3.5 这类混合架构，`blocks` 不会再把所有层画成同一种 Decoder。它会读取 `layer_types` 并展示：
+对 Qwen3.5 这类混合架构，`blocks` 不会再把所有层画成同一种 Decoder。它会读取配置或真实 key 并展示：
 
 - `HYBRID LAYER SCHEDULE`：DeltaNet/linear 层数、GQA/full 层数、宏块重复模式、O(T^2) 占比。
 - DeltaNet 分支：`linear_attn.in_proj_qkv`、`in_proj_a/b/z`、`conv1d`、`A_log`、`dt_bias`、`out_proj`、State Cache。
@@ -134,7 +142,22 @@ LANGUAGE DECODER STACK x 28
 - FFN 分支：Dense SwiGLU 或 SwiGLU MoE；MoE 会展示 router logits、Top-K dispatch、experts 折叠范围和 shared expert。
 - 多模态包装：如果配置里有 `vision_config`，会额外展示 ViT blocks、patch/temporal 参数、visual merger；如果有 MTP 权重，会展示 MTP side head。
 
-Qwen3.5 示例：
+Qwen3.5-35B-A3B metadata 示例：
+
+```bash
+modelscope download Qwen/Qwen3.5-35B-A3B \
+  --include config.json '*.safetensors.index.json' \
+  --local_dir ~/Documents/project/Qwen3.5-35B-A3B-ms-meta
+
+mad show ~/Documents/project/Qwen3.5-35B-A3B-ms-meta \
+  --view blocks,patterns \
+  --format markdown \
+  -o ~/Documents/project/qwen35-35b-a3b-structure.md
+```
+
+这个命令只下载 `config.json` 和 safetensors index，不需要下载大 safetensors shard。真实配置中 `text_config.layer_types` 长度为 40，`full_attention_interval=4`，对应 30 个 DeltaNet/linear 层和 10 个 GQA/full 层。
+
+其他 Qwen3.5 变体同样传模型目录即可：
 
 ```bash
 mad show ~/Documents/project/Qwen3.5-0.8B/Qwen3.5-0.8B \
@@ -143,25 +166,32 @@ mad show ~/Documents/project/Qwen3.5-0.8B/Qwen3.5-0.8B \
   -o ~/Documents/project/qwen35-structure.md
 ```
 
-结构图中的典型片段：
+Qwen3.5-35B-A3B 结构图中的典型片段：
 
 ```text
 HYBRID LAYER SCHEDULE
-DeltaNet/linear=18  GQA/full=6  O(T^2) share=25.0%
-macro-block x6: [L1:DeltaNet -> L2:DeltaNet -> L3:DeltaNet -> L4:GQA]
-DeltaNet layers: {0..2,4..6,8..10,12..14,16..18,20..22}
-GQA layers: {3,7,11,15,19,23}
-KV Cache layers=6; State Cache layers=18
+DeltaNet/linear=30  GQA/full=10  O(T^2) share=25.0%
+macro-block x10: [L1:DeltaNet -> L2:DeltaNet -> L3:DeltaNet -> L4:GQA]
+full_attention_interval=4
+DeltaNet layers: {0..2,4..6,8..10,12..14,16..18,20..22,24..26,28..30,32..34,36..38}
+GQA layers: {3,7,11,15,19,23,27,31,35,39}
+KV Cache layers=10; State Cache layers=30
 
-LANGUAGE DECODER STACK x 24
+LANGUAGE DECODER STACK x 40
 ├─ Attention dispatch by layer_types
-│  ├─ DeltaNet / linear_attn x 18
-│  │  ├─ in_proj_qkv  [6144,1024]
+│  ├─ DeltaNet / linear_attn x 30
+│  │  ├─ in_proj_qkv  [8192,2048]
 │  │  ├─ in_proj_a / in_proj_b / in_proj_z + conv1d + A_log + dt_bias
 │  │  └─ no [B,H,T,T]; O(T) state path, State Cache at inference
-│  └─ GQA / self_attn x 6
-│     ├─ q_proj / k_proj / v_proj / o_proj
+│  └─ GQA / self_attn x 10
+│     ├─ q_proj  [4096,2048]  heads=16
+│     ├─ k_proj  [512,2048]  kv_heads=2
+│     ├─ v_proj  [512,2048]  head_dim=256
 │     └─ only branch with KV Cache and O(T^2)
+├─ SwiGLU MoE MLP
+│  ├─ router gate.weight  experts=256
+│  ├─ Top-K dispatch: active=8 experts/token
+│  └─ shared_expert intermediate=512
 ```
 
 ## 4. 对比两个模型

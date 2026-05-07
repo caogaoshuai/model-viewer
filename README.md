@@ -52,6 +52,8 @@ mad --help
 
 如果只有 `config.json`，工具会按配置合成结构 tensor，这适合看层数、hidden size、MLP size、参数量和显存估算；如果要确认真实权重 key 或 dtype，请提供 `.safetensors` 或 index。
 
+对 Qwen3.5/Qwen3.6 这类混合结构，层类型只来自 `layer_types`、`full_attention_interval` 或 safetensors/index 中真实的 `linear_attn/self_attn` key。工具不会按 `model_type` 或模型名默认猜测结构；缺少这些 metadata 时，字符结构图会提示补齐配置或 index。
+
 ### 常用命令
 
 ```bash
@@ -167,7 +169,11 @@ mad show /path/to/model --view blocks --format markdown
 Qwen3.5 示例：
 
 ```bash
-mad show ~/Documents/project/Qwen3.5-0.8B/Qwen3.5-0.8B \
+modelscope download Qwen/Qwen3.5-35B-A3B \
+  --include config.json '*.safetensors.index.json' \
+  --local_dir ~/Documents/project/Qwen3.5-35B-A3B-ms-meta
+
+mad show ~/Documents/project/Qwen3.5-35B-A3B-ms-meta \
   --view blocks,patterns \
   --format markdown
 ```
@@ -176,9 +182,9 @@ mad show ~/Documents/project/Qwen3.5-0.8B/Qwen3.5-0.8B \
 
 ```text
 HYBRID LAYER SCHEDULE
-DeltaNet/linear=18  GQA/full=6  O(T^2) share=25.0%
-macro-block x6: [L1:DeltaNet -> L2:DeltaNet -> L3:DeltaNet -> L4:GQA]
-DeltaNet layers: {0..2,4..6,8..10,12..14,16..18,20..22}
-GQA layers: {3,7,11,15,19,23}
-KV Cache layers=6; State Cache layers=18
+DeltaNet/linear=30  GQA/full=10  O(T^2) share=25.0%
+macro-block x10: [L1:DeltaNet -> L2:DeltaNet -> L3:DeltaNet -> L4:GQA]
+DeltaNet layers: {0..2,4..6,8..10,12..14,16..18,20..22,24..26,28..30,32..34,36..38}
+GQA layers: {3,7,11,15,19,23,27,31,35,39}
+KV Cache layers=10; State Cache layers=30
 ```

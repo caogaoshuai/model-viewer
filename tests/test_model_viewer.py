@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 from model_viewer.diff import compare_models
@@ -157,6 +159,87 @@ class ModelViewerTest(unittest.TestCase):
         self.assertIn("GQA self_attn", gqa_detail)
         self.assertIn("Vision Encoder", memory)
         self.assertIn("State Cache", memory)
+
+    def test_qwen35_moe_reads_layer_types_from_config_and_index(self):
+        layer_types = ["linear_attention", "linear_attention", "linear_attention", "full_attention"] * 10
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "model_type": "qwen3_5_moe",
+                        "text_config": {
+                            "model_type": "qwen3_5_moe_text",
+                            "hidden_size": 2048,
+                            "num_hidden_layers": 40,
+                            "num_attention_heads": 16,
+                            "num_key_value_heads": 2,
+                            "head_dim": 256,
+                            "vocab_size": 248320,
+                            "layer_types": layer_types,
+                            "full_attention_interval": 4,
+                            "linear_num_key_heads": 16,
+                            "linear_num_value_heads": 32,
+                            "linear_key_head_dim": 128,
+                            "linear_value_head_dim": 128,
+                            "attn_output_gate": True,
+                            "num_experts": 256,
+                            "num_experts_per_tok": 8,
+                            "moe_intermediate_size": 512,
+                            "shared_expert_intermediate_size": 512,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            weight_map = {
+                "model.language_model.embed_tokens.weight": "model-00001-of-00001.safetensors",
+                "model.language_model.layers.0.linear_attn.in_proj_qkv.weight": "model-00001-of-00001.safetensors",
+                "model.language_model.layers.0.linear_attn.out_proj.weight": "model-00001-of-00001.safetensors",
+                "model.language_model.layers.3.self_attn.q_proj.weight": "model-00001-of-00001.safetensors",
+                "model.language_model.layers.3.self_attn.k_proj.weight": "model-00001-of-00001.safetensors",
+                "model.language_model.layers.3.self_attn.v_proj.weight": "model-00001-of-00001.safetensors",
+                "model.language_model.layers.3.self_attn.o_proj.weight": "model-00001-of-00001.safetensors",
+                "model.language_model.layers.0.mlp.gate.weight": "model-00001-of-00001.safetensors",
+                "model.language_model.layers.0.mlp.shared_expert.down_proj.weight": "model-00001-of-00001.safetensors",
+            }
+            (root / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}), encoding="utf-8")
+
+            snapshot = load_model(str(root))
+            rendered = render_show(snapshot, ["blocks", "patterns"], "markdown")
+
+        self.assertEqual(snapshot.profile["num_linear_attn_layers"], 30)
+        self.assertEqual(snapshot.profile["num_standard_attn_layers"], 10)
+        self.assertIn("HYBRID LAYER SCHEDULE", rendered)
+        self.assertIn("DeltaNet/linear=30  GQA/full=10", rendered)
+        self.assertIn("in_proj_qkv  [8192,2048]", rendered)
+        self.assertIn("experts=256", rendered)
+        self.assertIn("shared_expert intermediate=512", rendered)
+        self.assertIn("Architecture: DeltaNet layers", rendered)
+
+    def test_qwen35_moe_without_layer_metadata_is_not_guessed(self):
+        snapshot = ModelSnapshot(
+            name="missing_metadata",
+            source="fixture",
+            profile={
+                "model_type": "qwen3_5_moe",
+                "hidden_size": 2048,
+                "num_hidden_layers": 40,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "vocab_size": 248320,
+                "num_experts": 256,
+                "num_experts_per_tok": 8,
+                "moe_intermediate_size": 512,
+                "layer_kinds_source": "unspecified",
+            },
+        )
+
+        rendered = render_show(snapshot, ["blocks"], "markdown")
+
+        self.assertIn("LAYER TYPE METADATA MISSING", rendered)
+        self.assertNotIn("HYBRID LAYER SCHEDULE", rendered)
 
 
 if __name__ == "__main__":

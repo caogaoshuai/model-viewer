@@ -423,13 +423,15 @@ def render_block_diagram(snapshot: ModelSnapshot) -> str:
     linear_value_heads = int(p.get("linear_num_value_heads") or 0)
     linear_key_dim = int(p.get("linear_key_head_dim") or 0)
     linear_value_dim = int(p.get("linear_value_head_dim") or 0)
+    linear_qk_dim = linear_key_heads * linear_key_dim
+    linear_v_dim = linear_value_heads * linear_value_dim
     linear_qkv_shape = _first_shape_by_name(snapshot, ".linear_attn.in_proj_qkv.") or _shape_tuple(
-        (linear_key_heads * linear_key_dim) + (2 * linear_value_heads * linear_value_dim),
+        (2 * linear_qk_dim) + linear_v_dim,
         hidden,
     )
     linear_out_shape = _first_shape_by_name(snapshot, ".linear_attn.out_proj.") or _shape_tuple(
         hidden,
-        linear_value_heads * linear_value_dim,
+        linear_v_dim,
     )
 
     embed_shape = _first_shape(snapshot, "embed") or _shape_tuple(vocab, hidden)
@@ -476,6 +478,14 @@ def render_block_diagram(snapshot: ModelSnapshot) -> str:
             "        │",
             "        ▼",
         ])
+    else:
+        metadata_note = _layer_metadata_note(snapshot)
+        if metadata_note:
+            lines.extend([
+                _box("LAYER TYPE METADATA MISSING", metadata_note, width=width),
+                "        │",
+                "        ▼",
+            ])
     lines.extend([
         _box(f"LANGUAGE DECODER STACK x {layers}", _decoder_block_lines(
             hidden=hidden,
@@ -730,6 +740,8 @@ def _single_layer_detail(snapshot: ModelSnapshot, layer: int) -> str:
     linear_value_heads = int(p.get("linear_num_value_heads") or 0)
     linear_key_dim = int(p.get("linear_key_head_dim") or 0)
     linear_value_dim = int(p.get("linear_value_head_dim") or 0)
+    linear_qk_dim = linear_key_heads * linear_key_dim
+    linear_v_dim = linear_value_heads * linear_value_dim
     dtype = _dominant_dtype(snapshot)
     q_shape = _module_shapes_or(by_module, "q_proj", _shape_tuple(q_dim, hidden), dtype)
     k_shape = _module_shapes_or(by_module, "k_proj", _shape_tuple(kv_dim, hidden), dtype)
@@ -738,7 +750,7 @@ def _single_layer_detail(snapshot: ModelSnapshot, layer: int) -> str:
     linear_qkv = _module_shapes_or(
         by_module,
         "qkv_proj",
-        _shape_tuple((linear_key_heads * linear_key_dim) + (2 * linear_value_heads * linear_value_dim), hidden),
+        _shape_tuple((2 * linear_qk_dim) + linear_v_dim, hidden),
         dtype,
     )
     ln_shape = _module_shapes_or(by_module, "ln1", _shape_tuple(hidden), dtype)
@@ -1096,6 +1108,21 @@ def _is_hybrid_snapshot(snapshot: ModelSnapshot) -> bool:
     return any(_is_linear_attention(kind) for kind in kinds) and any(not _is_linear_attention(kind) for kind in kinds)
 
 
+def _layer_metadata_note(snapshot: ModelSnapshot) -> List[str]:
+    p = snapshot.profile
+    model_type = str(p.get("model_type") or "").lower()
+    if "qwen3_5" not in model_type and "qwen3.5" not in model_type and "qwen3_6" not in model_type and "qwen3.6" not in model_type:
+        return []
+    source = str(p.get("layer_kinds_source") or "unspecified")
+    if source != "unspecified":
+        return []
+    return [
+        "No layer_types, full_attention_interval, or linear_attn keys were found.",
+        "The view is intentionally not guessing hybrid layout from model_type.",
+        "Provide config.json with text_config.layer_types/full_attention_interval or a safetensors index.",
+    ]
+
+
 def _layer_schedule_lines(
     layer_kinds: Sequence[str],
     linear_layers: Sequence[int],
@@ -1355,7 +1382,9 @@ def _layer_module_shape(snapshot: ModelSnapshot, by_module: Dict[str, List[Tenso
     linear_value_heads = int(p.get("linear_num_value_heads") or 0)
     linear_key_dim = int(p.get("linear_key_head_dim") or 0)
     linear_value_dim = int(p.get("linear_value_head_dim") or 0)
-    linear_qkv = (linear_key_heads * linear_key_dim) + (2 * linear_value_heads * linear_value_dim)
+    linear_qk_dim = linear_key_heads * linear_key_dim
+    linear_v_dim = linear_value_heads * linear_value_dim
+    linear_qkv = (2 * linear_qk_dim) + linear_v_dim
     fallback = {
         "ln1": _shape_tuple(hidden),
         "ln2": _shape_tuple(hidden),
