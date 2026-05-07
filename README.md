@@ -110,7 +110,7 @@ mad diff \
 | `--view memory` | 权重和 KV cache 显存估算 |
 | `--view tree` | 折叠后的结构树 |
 | `--view patterns` | safetensors key 折叠图，把数字变化位置折叠成 `{0..N}` |
-| `--view blocks` | 字符结构图，展示 Embedding、Decoder、Attention、MLP、Norm、LM Head |
+| `--view blocks` | 字符结构图，展示 Embedding、Decoder、Attention、MLP/MoE、混合层调度、ViT/MTP、Norm、LM Head |
 | `--view all` | 输出所有核心视图 |
 | `--format markdown` | 适合写报告或贴文档 |
 | `--format json` | 适合 CI 消费 |
@@ -156,8 +156,29 @@ mad show /path/to/model --view blocks --format markdown
 输出会包含：
 
 - `TOKEN EMBEDDING`
-- `DECODER BLOCK x N`
-- `Attention` 下的 `q_proj / k_proj / v_proj / o_proj`
-- `MLP` 或 `MoE MLP`
+- `LANGUAGE DECODER STACK x N`
+- 普通 GQA/Attention 下的 `q_proj / k_proj / v_proj / o_proj`
+- Qwen3.5 等混合模型的 `HYBRID LAYER SCHEDULE`、DeltaNet/GQA 宏块比例、KV Cache/State Cache 层数
+- 多模态 Qwen3.5 的 `MULTIMODAL INPUT ROUTER`、ViT blocks、visual merger、MTP side head
+- `Dense SwiGLU MLP` 或 `SwiGLU MoE MLP`，MoE 会展示 router、Top-K、experts、shared expert
 - `FINAL NORM`
 - `LM HEAD`
+
+Qwen3.5 示例：
+
+```bash
+mad show ~/Documents/project/Qwen3.5-0.8B/Qwen3.5-0.8B \
+  --view blocks,patterns \
+  --format markdown
+```
+
+典型输出会把 `layer_types` 折成：
+
+```text
+HYBRID LAYER SCHEDULE
+DeltaNet/linear=18  GQA/full=6  O(T^2) share=25.0%
+macro-block x6: [L1:DeltaNet -> L2:DeltaNet -> L3:DeltaNet -> L4:GQA]
+DeltaNet layers: {0..2,4..6,8..10,12..14,16..18,20..22}
+GQA layers: {3,7,11,15,19,23}
+KV Cache layers=6; State Cache layers=18
+```

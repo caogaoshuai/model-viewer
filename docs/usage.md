@@ -106,7 +106,7 @@ mad show /path/to/model --view blocks --format markdown
 TOKEN EMBEDDING
         │
         ▼
-DECODER BLOCK x 28
+LANGUAGE DECODER STACK x 28
 ├─ RMSNorm
 ├─ Attention
 │  ├─ q_proj
@@ -123,6 +123,44 @@ DECODER BLOCK x 28
 ```
 
 对 MoE 模型，MLP 区域会显示 router、expert 数和 active expert 数。
+
+对 Qwen3.5 这类混合架构，`blocks` 不会再把所有层画成同一种 Decoder。它会读取 `layer_types` 并展示：
+
+- `HYBRID LAYER SCHEDULE`：DeltaNet/linear 层数、GQA/full 层数、宏块重复模式、O(T^2) 占比。
+- DeltaNet 分支：`linear_attn.in_proj_qkv`、`in_proj_a/b/z`、`conv1d`、`A_log`、`dt_bias`、`out_proj`、State Cache。
+- GQA 分支：`self_attn.q/k/v/o_proj`、`q_norm/k_norm`、RoPE、GQA group ratio、KV Cache。
+- FFN 分支：Dense SwiGLU 或 SwiGLU MoE；MoE 会展示 router logits、Top-K dispatch、experts 折叠范围和 shared expert。
+- 多模态包装：如果配置里有 `vision_config`，会额外展示 ViT blocks、patch/temporal 参数、visual merger；如果有 MTP 权重，会展示 MTP side head。
+
+Qwen3.5 示例：
+
+```bash
+mad show ~/Documents/project/Qwen3.5-0.8B/Qwen3.5-0.8B \
+  --view blocks,patterns \
+  --format markdown \
+  -o ~/Documents/project/qwen35-structure.md
+```
+
+结构图中的典型片段：
+
+```text
+HYBRID LAYER SCHEDULE
+DeltaNet/linear=18  GQA/full=6  O(T^2) share=25.0%
+macro-block x6: [L1:DeltaNet -> L2:DeltaNet -> L3:DeltaNet -> L4:GQA]
+DeltaNet layers: {0..2,4..6,8..10,12..14,16..18,20..22}
+GQA layers: {3,7,11,15,19,23}
+KV Cache layers=6; State Cache layers=18
+
+LANGUAGE DECODER STACK x 24
+├─ Attention dispatch by layer_types
+│  ├─ DeltaNet / linear_attn x 18
+│  │  ├─ in_proj_qkv  [6144,1024]
+│  │  ├─ in_proj_a / in_proj_b / in_proj_z + conv1d + A_log + dt_bias
+│  │  └─ no [B,H,T,T]; O(T) state path, State Cache at inference
+│  └─ GQA / self_attn x 6
+│     ├─ q_proj / k_proj / v_proj / o_proj
+│     └─ only branch with KV Cache and O(T^2)
+```
 
 ## 4. 对比两个模型
 
@@ -274,9 +312,14 @@ key 折叠图字段：
 | 字段 | 含义 |
 |---|---|
 | `TOKEN EMBEDDING` | 词表 embedding 入口 |
-| `DECODER BLOCK x 28` | 重复的 decoder 层数 |
+| `LANGUAGE DECODER STACK x 28` | 重复的语言 decoder 层数 |
+| `HYBRID LAYER SCHEDULE` | 混合注意力层调度，展示 DeltaNet/GQA 宏块模式 |
+| `MULTIMODAL INPUT ROUTER` | 多模态输入包装，展示文本路径、ViT 路径和 visual merger |
 | `Attention` | Q/K/V/O 投影与 head 配置 |
+| `DeltaNet / linear_attn` | Qwen3.5 线性注意力分支，无 `[B,H,T,T]` 矩阵，使用 State Cache |
+| `GQA / self_attn` | 标准分组查询注意力分支，只有该分支贡献 KV Cache 和 O(T²) 工作区 |
 | `MLP` | gate/up/down 或 MoE experts |
+| `MTP AUXILIARY HEAD` | 多 token prediction 辅助头，不计入主 decoder 层数 |
 | `FINAL NORM` | 输出前归一化 |
 | `LM HEAD` | 输出头，包含 tied embedding 标记 |
 

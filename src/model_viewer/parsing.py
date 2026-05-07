@@ -314,6 +314,15 @@ def _fallback_profile(config: Dict[str, Any]) -> Dict[str, Any]:
     num_experts = _first_config_attr(config, ("num_experts",)) or 0
     experts_per_tok = _first_config_attr(config, ("num_experts_per_tok",)) or 0
     shared = _first_config_attr(config, ("shared_expert_intermediate_size",)) or 0
+    linear_key_head_dim = _first_config_attr(config, ("linear_key_head_dim",)) or 0
+    linear_value_head_dim = _first_config_attr(config, ("linear_value_head_dim",)) or 0
+    linear_num_key_heads = _first_config_attr(config, ("linear_num_key_heads",)) or 0
+    linear_num_value_heads = _first_config_attr(config, ("linear_num_value_heads",)) or 0
+    full_attention_interval = _first_config_attr(config, ("full_attention_interval",)) or 0
+    linear_conv_kernel_dim = _first_config_attr(config, ("linear_conv_kernel_dim",)) or 0
+    attn_output_gate = bool(_first_config_attr(config, ("attn_output_gate",)) or False)
+    mtp_num_layers = _first_config_attr(config, ("mtp_num_hidden_layers", "mtp_num_layers")) or 0
+    vision_config = config.get("vision_config") if isinstance(config.get("vision_config"), dict) else {}
     model_type = str(config.get("model_type") or "").lower()
     kinds = _layer_kinds(int(layers or 0), layer_types)
     total = _estimate_total_params(
@@ -350,8 +359,38 @@ def _fallback_profile(config: Dict[str, Any]) -> Dict[str, Any]:
         "num_dense_layers": 0 if num_experts else int(layers or 0),
         "num_linear_attn_layers": sum(1 for kind in kinds if kind == "linear_attention"),
         "num_standard_attn_layers": sum(1 for kind in kinds if kind != "linear_attention"),
+        "num_kv_cache_layers": sum(1 for kind in kinds if kind != "linear_attention"),
         "layer_kinds": kinds,
+        "full_attention_interval": int(full_attention_interval or 0),
+        "linear_conv_kernel_dim": int(linear_conv_kernel_dim or 0),
+        "linear_key_head_dim": int(linear_key_head_dim or 0),
+        "linear_value_head_dim": int(linear_value_head_dim or 0),
+        "linear_num_key_heads": int(linear_num_key_heads or 0),
+        "linear_num_value_heads": int(linear_num_value_heads or 0),
+        "attn_output_gate": attn_output_gate,
+        "mtp_num_layers": int(mtp_num_layers or 0),
+        "is_multimodal": bool(vision_config),
+        "vit": _vit_profile(vision_config),
     }
+
+
+def _vit_profile(vision_config: Any) -> Dict[str, Any]:
+    if not isinstance(vision_config, dict):
+        return {}
+    keys = (
+        "depth",
+        "hidden_size",
+        "num_heads",
+        "intermediate_size",
+        "patch_size",
+        "spatial_merge_size",
+        "temporal_patch_size",
+        "hidden_act",
+        "out_hidden_size",
+        "num_position_embeddings",
+        "in_channels",
+    )
+    return {key: vision_config.get(key) for key in keys if key in vision_config}
 
 
 def _estimate_total_params(
@@ -560,6 +599,7 @@ def _module_name(canonical_name: str) -> str:
         "k_proj": "k_proj",
         "v_proj": "v_proj",
         "qkv_proj": "qkv_proj",
+        "in_proj_qkv": "qkv_proj",
         "query_key_value": "qkv_proj",
         "c_attn": "qkv_proj",
         "o_proj": "o_proj",

@@ -67,9 +67,67 @@ class ModelViewerTest(unittest.TestCase):
         rendered = render_show(snapshot, ["blocks"], "markdown")
         self.assertIn("Character Block Diagram", rendered)
         self.assertIn("TOKEN EMBEDDING", rendered)
-        self.assertIn("DECODER BLOCK x 2", rendered)
+        self.assertIn("LANGUAGE DECODER STACK x 2", rendered)
         self.assertIn("Attention", rendered)
         self.assertIn("MLP", rendered)
+
+    def test_block_diagram_renders_qwen35_hybrid_structure(self):
+        snapshot = ModelSnapshot(
+            name="qwen3_5_hybrid",
+            source="fixture",
+            profile={
+                "model_type": "qwen3_5",
+                "total_params": 1000,
+                "hidden_size": 16,
+                "intermediate_size": 32,
+                "num_hidden_layers": 4,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 1,
+                "head_dim": 4,
+                "vocab_size": 128,
+                "tie_word_embeddings": True,
+                "layer_kinds": ["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+                "num_linear_attn_layers": 3,
+                "num_standard_attn_layers": 1,
+                "num_kv_cache_layers": 1,
+                "full_attention_interval": 4,
+                "linear_num_key_heads": 2,
+                "linear_num_value_heads": 2,
+                "linear_key_head_dim": 8,
+                "linear_value_head_dim": 8,
+                "attn_output_gate": True,
+                "num_experts": 8,
+                "num_experts_per_tok": 2,
+                "moe_intermediate_size": 4,
+                "shared_expert_intermediate_size": 4,
+                "is_multimodal": True,
+                "vit": {
+                    "depth": 2,
+                    "hidden_size": 12,
+                    "num_heads": 3,
+                    "intermediate_size": 24,
+                    "patch_size": 16,
+                    "spatial_merge_size": 2,
+                    "temporal_patch_size": 2,
+                    "out_hidden_size": 16,
+                },
+                "mtp_num_layers": 1,
+            },
+        )
+
+        rendered = render_show(snapshot, ["blocks"], "markdown")
+        self.assertIn("MULTIMODAL INPUT ROUTER", rendered)
+        self.assertIn("HYBRID LAYER SCHEDULE", rendered)
+        self.assertIn("macro-block x1: [L1:DeltaNet -> L2:DeltaNet -> L3:DeltaNet -> L4:GQA]", rendered)
+        self.assertIn("DeltaNet layers: {0..2}", rendered)
+        self.assertIn("GQA layers: {3}", rendered)
+        self.assertIn("KV Cache layers=1; State Cache layers=3", rendered)
+        self.assertIn("DeltaNet / linear_attn x 3", rendered)
+        self.assertIn("GQA / self_attn x 1", rendered)
+        self.assertIn("SwiGLU MoE MLP", rendered)
+        self.assertIn("experts=8", rendered)
+        self.assertIn("active=2", rendered)
+        self.assertIn("MTP AUXILIARY HEAD", rendered)
 
 
 if __name__ == "__main__":

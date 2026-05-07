@@ -159,7 +159,58 @@ Qwen2ForCausalLM  [7.62B params, bf16]
 | `layers.[0..27] × 28 ⚠ (3 异构)` | 大部分同构、少数异构 | 有少数层 shape 不同时高亮 |
 | `layers.[A][0..15] [L][16..31]` | 标注层类型 | 混合注意力（A=Attn, L=Linear/DeltaNet）|
 
-## 范例 8：状态符号约定
+## 范例 8：Qwen3.5 混合结构字符图
+
+```text
+Qwen3.5-0.8B [qwen3_5 | 752.44M | bf16]
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│ MULTIMODAL INPUT ROUTER                                                              │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│ text path: input_ids -> language_model.embed_tokens                                  │
+│ vision path: patch_embed(patch=16, temporal=2, merge=2)                              │
+│ ViT blocks x 12: hidden=768 heads=12 intermediate=3072                               │
+│ visual merger: vision hidden 768 -> language hidden 1024                             │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│ HYBRID LAYER SCHEDULE                                                                │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│ DeltaNet/linear=18  GQA/full=6  O(T^2) share=25.0%                                   │
+│ macro-block x6: [L1:DeltaNet -> L2:DeltaNet -> L3:DeltaNet -> L4:GQA]                │
+│ DeltaNet layers: {0..2,4..6,8..10,12..14,16..18,20..22}                              │
+│ GQA layers: {3,7,11,15,19,23}                                                        │
+│ KV Cache layers=6; State Cache layers=18                                             │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│ LANGUAGE DECODER STACK x 24                                                          │
+├──────────────────────────────────────────────────────────────────────────────────────┤
+│ ├─ Attention dispatch by layer_types                                                 │
+│ │  ├─ DeltaNet / linear_attn x 18                                                    │
+│ │  │  ├─ in_proj_qkv + in_proj_a/b/z + conv1d + A_log + dt_bias                      │
+│ │  │  └─ no [B,H,T,T]; O(T) state path, State Cache at inference                     │
+│ │  └─ GQA / self_attn x 6                                                            │
+│ │     ├─ q_proj / k_proj / v_proj / o_proj + q_norm/k_norm + RoPE                    │
+│ │     └─ only branch with KV Cache and O(T^2)                                        │
+│ ├─ Dense SwiGLU MLP or SwiGLU MoE MLP                                                │
+│ └─ Residual Add -> next layer                                                        │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+对更大的 Qwen3.5 MoE 变体，FFN 区域会进一步展开成：
+
+```text
+├─ SwiGLU MoE MLP (same FFN on DeltaNet and GQA layers)
+│  ├─ router gate.weight  experts=256  logits=B x T x 256
+│  ├─ Top-K dispatch: active=8 experts/token
+│  ├─ experts.{0..255}.gate/up  [i_e,h]
+│  ├─ experts.{0..255}.down     [h,i_e]
+│  └─ shared_expert intermediate=i_s
+```
+
+## 范例 9：状态符号约定
 
 | 符号 | 含义 |
 |---|---|
