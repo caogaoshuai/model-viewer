@@ -1,0 +1,85 @@
+{
+  "schema_version": "model-viewer.snapshot.v1",
+  "name": "fused_b",
+  "source": "fixture",
+  "config": {
+    "model_type": "qwen2",
+    "tie_word_embeddings": true
+  },
+  "profile": {
+    "model_type": "qwen2",
+    "hidden_size": 16,
+    "intermediate_size": 32,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 4,
+    "vocab_size": 128,
+    "tie_word_embeddings": true,
+    "total_params": 4096
+  },
+  "warnings": [],
+  "tensors": [
+    {
+      "name": "model.embed_tokens.weight",
+      "shape": [128, 16],
+      "dtype": "bf16",
+      "kind": "embedding",
+      "layer": null,
+      "module": "embed",
+      "canonical_name": "model.embed_tokens.weight",
+      "source": "fixture"
+    },
+    {
+      "name": "model.layers.0.self_attn.qkv_proj.weight",
+      "shape": [32, 16],
+      "dtype": "int4",
+      "kind": "weight",
+      "layer": 0,
+      "module": "qkv_proj",
+      "canonical_name": "model.layers.0.self_attn.qkv_proj.weight",
+      "source": "fixture"
+    },
+    {
+      "name": "model.layers.0.self_attn.o_proj.weight",
+      "shape": [16, 16],
+      "dtype": "int4",
+      "kind": "weight",
+      "layer": 0,
+      "module": "o_proj",
+      "canonical_name": "model.layers.0.self_attn.o_proj.weight",
+      "source": "fixture"
+    },
+    {
+      "name": "model.layers.0.mlp.gate_up_proj.weight",
+      "shape": [64, 16],
+      "dtype": "int4",
+      "kind": "weight",
+      "layer": 0,
+      "module": "gate_up",
+      "canonical_name": "model.layers.0.mlp.gate_up_proj.weight",
+      "source": "fixture"
+    },
+    {
+      "name": "model.layers.0.mlp.down_proj.weight",
+      "shape": [16, 32],
+      "dtype": "int4",
+      "kind": "weight",
+      "layer": 0,
+      "module": "down",
+      "canonical_name": "model.layers.0.mlp.down_proj.weight",
+      "source": "fixture"
+    },
+    {
+      "name": "model.layers.0.self_attn.qkv_proj.scales",
+      "shape": [32],
+      "dtype": "fp16",
+      "kind": "quant_aux",
+      "layer": 0,
+      "module": "qkv_proj",
+      "canonical_name": "model.layers.0.self_attn.qkv_proj.weight",
+      "parent": "model.layers.0.self_attn.qkv_proj.weight",
+      "source": "fixture"
+    }
+  ]
+}

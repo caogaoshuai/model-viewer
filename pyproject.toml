@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "model-viewer"
+version = "0.1.0"
+description = "Model architecture visualization and diff CLI."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Model Viewer Contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+hub = ["huggingface_hub>=0.20", "modelscope>=1.12"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+mad = "model_viewer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
