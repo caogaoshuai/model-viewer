@@ -84,6 +84,9 @@ mad show /path/to/model --view patterns --format markdown
 
 # 7. 展示字符结构图，直观看每个结构块
 mad show /path/to/model --view blocks --format markdown
+
+# 8. 输出语言默认中文；需要英文报告时显式指定
+mad diff /path/to/model_a /path/to/model_b --view patterns --lang en
 ```
 
 ### 对比 Qwen3-0.6B 和 Qwen3-1.7B
@@ -122,6 +125,7 @@ mad diff \
 | `--view blocks` | 字符结构图，展示 Embedding、Decoder、Attention、MLP/MoE、混合层调度、ViT/MTP、Norm、LM Head |
 | `--view all` | 输出所有核心视图 |
 | `--ignore-quantization` | diff 时忽略量化 dtype、`.qweight/.packed_weight` 物理打包形状和量化辅助 tensor |
+| `--lang zh\|en` | 输出语言，默认 `zh`；需要英文报告时传 `--lang en` |
 | `--format markdown` | 适合写报告或贴文档 |
 | `--format json` | 适合 CI 消费 |
 | `--format drawio` | 输出 draw.io XML |

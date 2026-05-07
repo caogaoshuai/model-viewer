@@ -11,6 +11,7 @@ from .schema import ModelSnapshot, TensorInfo, dtype_nbytes, normalize_dtype
 
 
 VIEW_ORDER = ("overview", "heatmap", "detail", "mapping", "memory", "tree", "patterns", "blocks")
+LANGUAGES = {"zh", "en"}
 MODULES = (
     "embed",
     "ln1",
@@ -47,7 +48,56 @@ def parse_views(raw: str) -> List[str]:
     return views
 
 
-def render_show(snapshot: ModelSnapshot, views: Sequence[str], output_format: str, layer: Optional[int] = None) -> str:
+def _normalize_language(language: str) -> str:
+    value = (language or "zh").lower()
+    if value in {"zh", "zh-cn", "cn", "chinese"}:
+        return "zh"
+    if value in {"en", "en-us", "english"}:
+        return "en"
+    if value not in LANGUAGES:
+        raise ValueError(f"Unsupported language: {language}")
+    return value
+
+
+def _text(language: str, zh: str, en: str) -> str:
+    return zh if _normalize_language(language) == "zh" else en
+
+
+def _section_title(view: str, language: str) -> str:
+    en = {
+        "overview": "Overview",
+        "heatmap": "Heatmap",
+        "detail": "Layer Detail",
+        "mapping": "Key Mapping",
+        "memory": "Memory Footprint",
+        "tree": "Raw Tree",
+        "patterns": "Safetensor Key Patterns",
+        "patterns_diff": "Safetensor Key Pattern Diff",
+        "blocks": "Character Block Diagram",
+    }
+    zh = {
+        "overview": "结构总览",
+        "heatmap": "差异热力图",
+        "detail": "层级详情",
+        "mapping": "Key 映射",
+        "memory": "显存估算",
+        "tree": "原始结构树",
+        "patterns": "Safetensors Key 模式",
+        "patterns_diff": "Safetensors Key 模式差异",
+        "blocks": "字符结构图",
+    }
+    titles = zh if _normalize_language(language) == "zh" else en
+    return titles.get(view, view.title())
+
+
+def render_show(
+    snapshot: ModelSnapshot,
+    views: Sequence[str],
+    output_format: str,
+    layer: Optional[int] = None,
+    language: str = "zh",
+) -> str:
+    language = _normalize_language(language)
     if output_format == "json" or "json" in views:
         return json_dumps(snapshot.to_dict())
     if output_format == "mermaid":
@@ -60,23 +110,30 @@ def render_show(snapshot: ModelSnapshot, views: Sequence[str], output_format: st
     sections: List[Tuple[str, str]] = []
     for view in views:
         if view == "overview":
-            sections.append(("Overview", render_overview_mermaid(snapshot)))
+            sections.append((_section_title("overview", language), render_overview_mermaid(snapshot)))
         elif view == "detail":
-            sections.append(("Layer Detail", render_layer_detail(snapshot, layer=layer or 0)))
+            sections.append((_section_title("detail", language), render_layer_detail(snapshot, layer=layer or 0)))
         elif view == "memory":
-            sections.append(("Memory Footprint", render_memory(snapshot)))
+            sections.append((_section_title("memory", language), render_memory(snapshot, language=language)))
         elif view == "tree":
-            sections.append(("Raw Tree", render_tree(snapshot)))
+            sections.append((_section_title("tree", language), render_tree(snapshot)))
         elif view == "patterns":
-            sections.append(("Safetensor Key Patterns", render_key_patterns(snapshot)))
+            sections.append((_section_title("patterns", language), render_key_patterns(snapshot, language=language)))
         elif view == "blocks":
-            sections.append(("Character Block Diagram", render_block_diagram(snapshot)))
+            sections.append((_section_title("blocks", language), render_block_diagram(snapshot)))
         elif view in {"heatmap", "mapping"}:
-            sections.append((view.title(), f"{view} is available for diff output."))
-    return _join_sections(sections, output_format)
+            sections.append((_section_title(view, language), _text(language, f"{view} 仅用于 diff 输出。", f"{view} is available for diff output.")))
+    return _join_sections(sections, output_format, language=language)
 
 
-def render_diff(diff: ModelDiff, views: Sequence[str], output_format: str, layer: Optional[int] = None) -> str:
+def render_diff(
+    diff: ModelDiff,
+    views: Sequence[str],
+    output_format: str,
+    layer: Optional[int] = None,
+    language: str = "zh",
+) -> str:
+    language = _normalize_language(language)
     if output_format == "json" or "json" in views:
         return json_dumps(
             {
@@ -110,24 +167,24 @@ def render_diff(diff: ModelDiff, views: Sequence[str], output_format: str, layer
     sections: List[Tuple[str, str]] = []
     for view in views:
         if view == "overview":
-            sections.append(("Overview", render_diff_overview_mermaid(diff)))
+            sections.append((_section_title("overview", language), render_diff_overview_mermaid(diff)))
         elif view == "heatmap":
-            sections.append(("Heatmap", render_heatmap(diff)))
+            sections.append((_section_title("heatmap", language), render_heatmap(diff)))
         elif view == "detail":
-            sections.append(("Layer Detail", render_layer_detail(diff.left, diff.right, layer=layer or 0)))
+            sections.append((_section_title("detail", language), render_layer_detail(diff.left, diff.right, layer=layer or 0)))
         elif view == "mapping":
-            sections.append(("Key Mapping", render_mapping(diff)))
+            sections.append((_section_title("mapping", language), render_mapping(diff)))
         elif view == "memory":
-            sections.append(("Memory Footprint", render_memory_diff(diff)))
+            sections.append((_section_title("memory", language), render_memory_diff(diff)))
         elif view == "tree":
-            sections.append((f"Raw Tree: {diff.left.name}", render_tree(diff.left)))
-            sections.append((f"Raw Tree: {diff.right.name}", render_tree(diff.right)))
+            sections.append((f"{_section_title('tree', language)}: {diff.left.name}", render_tree(diff.left)))
+            sections.append((f"{_section_title('tree', language)}: {diff.right.name}", render_tree(diff.right)))
         elif view == "patterns":
-            sections.append(("Safetensor Key Pattern Diff", render_key_patterns_diff(diff)))
+            sections.append((_section_title("patterns_diff", language), render_key_patterns_diff(diff, language=language)))
         elif view == "blocks":
-            sections.append((f"Character Block Diagram: {diff.left.name}", render_block_diagram(diff.left)))
-            sections.append((f"Character Block Diagram: {diff.right.name}", render_block_diagram(diff.right)))
-    return _join_sections(sections, output_format)
+            sections.append((f"{_section_title('blocks', language)}: {diff.left.name}", render_block_diagram(diff.left)))
+            sections.append((f"{_section_title('blocks', language)}: {diff.right.name}", render_block_diagram(diff.right)))
+    return _join_sections(sections, output_format, language=language)
 
 
 def render_overview_mermaid(snapshot: ModelSnapshot) -> str:
@@ -365,12 +422,17 @@ def _vision_label(snapshot: ModelSnapshot) -> str:
     return f"ViT x{depth}, hidden={hidden}, heads={heads}, out={out_hidden}"
 
 
-def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240) -> str:
+def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240, language: str = "zh") -> str:
+    language = _normalize_language(language)
     patterns = fold_key_patterns(snapshot)
     lines = [
-        f"Safetensor Key Folding [{len(snapshot.tensors)} keys -> {len(patterns)} patterns]",
+        _text(
+            language,
+            f"Safetensors Key 折叠 [{len(snapshot.tensors)} 个 key -> {len(patterns)} 个模式]",
+            f"Safetensor Key Folding [{len(snapshot.tensors)} keys -> {len(patterns)} patterns]",
+        ),
     ]
-    hints = _pattern_architecture_hints(snapshot)
+    hints = _pattern_architecture_hints(snapshot, language=language)
     if hints:
         lines.extend(hints)
     shown = patterns[:limit]
@@ -383,42 +445,98 @@ def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240) -> str:
             suffix += f"  {pattern.dtype}"
         lines.append(f"{branch} {pattern.pattern}  {suffix}")
     if len(patterns) > limit:
-        lines.append(f"└── ... {len(patterns) - limit} more patterns")
+        lines.append(
+            _text(
+                language,
+                f"└── ... 还有 {len(patterns) - limit} 个模式未显示",
+                f"└── ... {len(patterns) - limit} more patterns",
+            )
+        )
     return "\n".join(lines)
 
 
-def render_key_patterns_diff(diff: ModelDiff, limit: int = 120) -> str:
+def render_key_patterns_diff(diff: ModelDiff, limit: int = 120, language: str = "zh") -> str:
+    language = _normalize_language(language)
     left_patterns = fold_key_patterns(diff.left)
     right_patterns = fold_key_patterns(diff.right)
-    rows, summary = _pattern_diff_rows(left_patterns, right_patterns)
+    rows, summary = _pattern_diff_rows(left_patterns, right_patterns, language=language)
     shown = rows[:limit]
     lines = [
-        f"Left: {diff.left.name} [{len(diff.left.tensors)} keys -> {len(left_patterns)} patterns]",
-        f"Right: {diff.right.name} [{len(diff.right.tensors)} keys -> {len(right_patterns)} patterns]",
-        "Summary: "
-        + ", ".join(
-            f"{name}={summary.get(name, 0)}"
-            for name in ("exact", "equivalent", "dtype", "shape_or_count", "left_only", "right_only")
+        _text(
+            language,
+            f"左侧: {diff.left.name} [{len(diff.left.tensors)} 个 key -> {len(left_patterns)} 个模式]",
+            f"Left: {diff.left.name} [{len(diff.left.tensors)} keys -> {len(left_patterns)} patterns]",
         ),
+        _text(
+            language,
+            f"右侧: {diff.right.name} [{len(diff.right.tensors)} 个 key -> {len(right_patterns)} 个模式]",
+            f"Right: {diff.right.name} [{len(diff.right.tensors)} keys -> {len(right_patterns)} patterns]",
+        ),
+        _pattern_summary_line(summary, language),
     ]
-    lines.extend(_pattern_diff_explanation(summary))
+    lines.extend(_pattern_diff_explanation(summary, language))
     if not rows:
-        lines.append("No pattern-level differences.")
+        lines.append(_text(language, "没有发现模式级差异。", "No pattern-level differences."))
         return "\n".join(lines)
     lines.append("")
     lines.append(
         markdown_table(
-            ["Status", "Left pattern", "Right pattern", "Detail"],
-            [[status, left, right, detail] for status, left, right, detail in shown],
+            _pattern_table_headers(language),
+            [[_pattern_status_label(status, language), left, right, detail] for status, left, right, detail in shown],
         )
     )
     if len(rows) > limit:
-        lines.append(f"\n... {len(rows) - limit} more pattern differences hidden")
-    lines.append("\nUse `mad show <model> --view patterns` to inspect a full folded tree for one side.")
+        lines.append(
+            _text(
+                language,
+                f"\n... 还有 {len(rows) - limit} 条模式差异未显示",
+                f"\n... {len(rows) - limit} more pattern differences hidden",
+            )
+        )
+    lines.append(
+        _text(
+            language,
+            "\n可用 `mad show <model> --view patterns` 查看某一侧完整折叠树。",
+            "\nUse `mad show <model> --view patterns` to inspect a full folded tree for one side.",
+        )
+    )
     return "\n".join(lines)
 
 
-def _pattern_diff_explanation(summary: Dict[str, int]) -> List[str]:
+def _pattern_summary_line(summary: Dict[str, int], language: str) -> str:
+    keys = ("exact", "equivalent", "dtype", "shape_or_count", "left_only", "right_only")
+    if _normalize_language(language) == "en":
+        return "Summary: " + ", ".join(f"{name}={summary.get(name, 0)}" for name in keys)
+    labels = {
+        "exact": "完全一致",
+        "equivalent": "等价存储差异",
+        "dtype": "仅 dtype 差异",
+        "shape_or_count": "shape/count 差异",
+        "left_only": "仅左侧存在",
+        "right_only": "仅右侧存在",
+    }
+    return "摘要: " + ", ".join(f"{name}={summary.get(name, 0)}（{labels[name]}）" for name in keys)
+
+
+def _pattern_table_headers(language: str) -> List[str]:
+    if _normalize_language(language) == "zh":
+        return ["状态", "左侧模式", "右侧模式", "说明"]
+    return ["Status", "Left pattern", "Right pattern", "Detail"]
+
+
+def _pattern_status_label(status: str, language: str) -> str:
+    if _normalize_language(language) == "en":
+        return status
+    return {
+        "equivalent": "等价",
+        "dtype": "仅 dtype",
+        "shape/count": "shape/count",
+        "left_only": "仅左侧",
+        "right_only": "仅右侧",
+    }.get(status, status)
+
+
+def _pattern_diff_explanation(summary: Dict[str, int], language: str) -> List[str]:
     exact = summary.get("exact", 0)
     equivalent = summary.get("equivalent", 0)
     dtype = summary.get("dtype", 0)
@@ -426,6 +544,30 @@ def _pattern_diff_explanation(summary: Dict[str, int]) -> List[str]:
     left_only = summary.get("left_only", 0)
     right_only = summary.get("right_only", 0)
     structural = shape_or_count + left_only + right_only
+    if _normalize_language(language) == "zh":
+        lines = [
+            "解释:",
+            f"- exact={exact}: 折叠后的 key 模式完全相同。",
+            f"- equivalent={equivalent}: key 名或存储方式不同，但工具识别为同一组逻辑权重，例如 fuse/split 或 expert 打包。",
+            f"- dtype={dtype}: key 模式、数量和 shape 一致，只是保存精度不同。",
+        ]
+        if structural:
+            lines.append(
+                f"- shape_or_count={shape_or_count}, left_only={left_only}, right_only={right_only}: 仍有潜在真实结构或命名差异，需要重点排查。"
+            )
+        else:
+            lines.append(
+                "- shape_or_count=0, left_only=0, right_only=0: 没有未解释的结构或命名差异。"
+            )
+        if structural:
+            lines.append(
+                f"结论: 需要人工确认；仍有 {structural} 个模式不能用已知等价布局或 dtype-only 差异解释。"
+            )
+        elif equivalent or dtype:
+            lines.append("结论: 没有发现未解释的结构差异；当前差异主要是存储布局等价变化和/或 dtype 变化。")
+        else:
+            lines.append("结论: 折叠后的 safetensors key 模式完全一致。")
+        return lines
     lines = [
         "Interpretation:",
         f"- exact={exact}: folded key patterns match exactly.",
@@ -456,7 +598,9 @@ def _pattern_diff_explanation(summary: Dict[str, int]) -> List[str]:
 def _pattern_diff_rows(
     left_patterns: Sequence[KeyPattern],
     right_patterns: Sequence[KeyPattern],
+    language: str = "zh",
 ) -> Tuple[List[Tuple[str, str, str, str]], Dict[str, int]]:
+    language = _normalize_language(language)
     rows: List[Tuple[str, str, str, str]] = []
     summary = {
         "exact": 0,
@@ -478,7 +622,7 @@ def _pattern_diff_rows(
         used_right.add(right_idx)
         summary["exact"] += 1
 
-    _append_known_pattern_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary)
+    _append_known_pattern_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary, language)
 
     right_by_pattern: Dict[str, List[int]] = defaultdict(list)
     for idx, pattern in enumerate(right_patterns):
@@ -496,23 +640,41 @@ def _pattern_diff_rows(
         used_right.add(right_idx)
         if left_pattern.count == right_pattern.count and left_pattern.shape == right_pattern.shape and left_pattern.dtype != right_pattern.dtype:
             status = "dtype"
-            detail = f"dtype differs: {left_pattern.dtype or '?'} -> {right_pattern.dtype or '?'}"
+            detail = _text(
+                language,
+                f"dtype 不同: {left_pattern.dtype or '?'} -> {right_pattern.dtype or '?'}；结构、数量和 shape 一致",
+                f"dtype differs: {left_pattern.dtype or '?'} -> {right_pattern.dtype or '?'}",
+            )
             summary["dtype"] += 1
         else:
             status = "shape/count"
-            detail = _shape_count_detail(left_pattern, right_pattern)
+            detail = _shape_count_detail(left_pattern, right_pattern, language)
             summary["shape_or_count"] += 1
         rows.append((status, _pattern_brief(left_pattern), _pattern_brief(right_pattern), detail))
 
     for idx, pattern in enumerate(left_patterns):
         if idx in used_left:
             continue
-        rows.append(("left_only", _pattern_brief(pattern), "-", "pattern missing on right"))
+        rows.append(
+            (
+                "left_only",
+                _pattern_brief(pattern),
+                "-",
+                _text(language, "右侧缺少该模式", "pattern missing on right"),
+            )
+        )
         summary["left_only"] += 1
     for idx, pattern in enumerate(right_patterns):
         if idx in used_right:
             continue
-        rows.append(("right_only", "-", _pattern_brief(pattern), "pattern new on right"))
+        rows.append(
+            (
+                "right_only",
+                "-",
+                _pattern_brief(pattern),
+                _text(language, "右侧新增该模式", "pattern new on right"),
+            )
+        )
         summary["right_only"] += 1
     return rows, summary
 
@@ -524,11 +686,12 @@ def _append_known_pattern_equivalences(
     used_right: set[int],
     rows: List[Tuple[str, str, str, str]],
     summary: Dict[str, int],
+    language: str,
 ) -> None:
-    _append_linear_fusion_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary)
-    _append_linear_fusion_equivalences(right_patterns, left_patterns, used_right, used_left, rows, summary, reverse=True)
-    _append_expert_fusion_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary)
-    _append_expert_fusion_equivalences(right_patterns, left_patterns, used_right, used_left, rows, summary, reverse=True)
+    _append_linear_fusion_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary, language)
+    _append_linear_fusion_equivalences(right_patterns, left_patterns, used_right, used_left, rows, summary, language, reverse=True)
+    _append_expert_fusion_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary, language)
+    _append_expert_fusion_equivalences(right_patterns, left_patterns, used_right, used_left, rows, summary, language, reverse=True)
 
 
 def _append_linear_fusion_equivalences(
@@ -538,18 +701,27 @@ def _append_linear_fusion_equivalences(
     used_fused: set[int],
     rows: List[Tuple[str, str, str, str]],
     summary: Dict[str, int],
+    language: str,
     reverse: bool = False,
 ) -> None:
     for suffix, part_suffixes, detail in (
         (
             ".linear_attn.in_proj_qkvz.weight",
             (".linear_attn.in_proj_qkv.weight", ".linear_attn.in_proj_z.weight"),
-            "linear_attn fusion: in_proj_qkv + in_proj_z -> in_proj_qkvz",
+            _text(
+                language,
+                "linear_attn 融合: in_proj_qkv + in_proj_z -> in_proj_qkvz；左侧拆分保存，右侧合并保存，逻辑权重等价",
+                "linear_attn fusion: in_proj_qkv + in_proj_z -> in_proj_qkvz",
+            ),
         ),
         (
             ".linear_attn.in_proj_ba.weight",
             (".linear_attn.in_proj_b.weight", ".linear_attn.in_proj_a.weight"),
-            "linear_attn fusion: in_proj_b + in_proj_a -> in_proj_ba",
+            _text(
+                language,
+                "linear_attn 融合: in_proj_b + in_proj_a -> in_proj_ba；左侧拆分保存，右侧合并保存，逻辑权重等价",
+                "linear_attn fusion: in_proj_b + in_proj_a -> in_proj_ba",
+            ),
         ),
     ):
         for fused_idx, fused in enumerate(fused_patterns):
@@ -581,6 +753,7 @@ def _append_expert_fusion_equivalences(
     used_expanded: set[int],
     rows: List[Tuple[str, str, str, str]],
     summary: Dict[str, int],
+    language: str,
     reverse: bool = False,
 ) -> None:
     for fused_idx, fused in enumerate(fused_patterns):
@@ -598,7 +771,11 @@ def _append_expert_fusion_equivalences(
                 continue
             used_fused.add(fused_idx)
             used_expanded.update({gate_idx, up_idx})
-            detail = "MoE expert fusion: expert gate_proj + up_proj -> gate_up_proj"
+            detail = _text(
+                language,
+                "MoE expert 融合: 每个 expert 的 gate_proj + up_proj 合并为 gate_up_proj；逻辑权重等价",
+                "MoE expert fusion: expert gate_proj + up_proj -> gate_up_proj",
+            )
             left_text = _pattern_brief(fused) if not reverse else _pattern_group_brief([gate, up])
             right_text = _pattern_group_brief([gate, up]) if not reverse else _pattern_brief(fused)
             rows.append(("equivalent", left_text, right_text, detail))
@@ -613,7 +790,11 @@ def _append_expert_fusion_equivalences(
                 continue
             used_fused.add(fused_idx)
             used_expanded.add(down_idx)
-            detail = "MoE expert packing: experts dimension packed into one tensor"
+            detail = _text(
+                language,
+                "MoE expert 打包: experts 维度被打包进一个 tensor；逻辑权重等价",
+                "MoE expert packing: experts dimension packed into one tensor",
+            )
             left_text = _pattern_brief(fused) if not reverse else _pattern_brief(down)
             right_text = _pattern_brief(down) if not reverse else _pattern_brief(fused)
             rows.append(("equivalent", left_text, right_text, detail))
@@ -718,18 +899,24 @@ def _pattern_group_brief(patterns: Sequence[KeyPattern]) -> str:
     return "\n".join(_pattern_brief(pattern) for pattern in patterns)
 
 
-def _shape_count_detail(left: KeyPattern, right: KeyPattern) -> str:
+def _shape_count_detail(left: KeyPattern, right: KeyPattern, language: str = "zh") -> str:
     details = []
     if left.count != right.count:
-        details.append(f"count {left.count} -> {right.count}")
+        details.append(_text(language, f"数量 {left.count} -> {right.count}", f"count {left.count} -> {right.count}"))
     if left.shape != right.shape:
-        details.append(f"shape {shape_text(left.shape)} -> {shape_text(right.shape)}")
+        details.append(
+            _text(
+                language,
+                f"shape {shape_text(left.shape)} -> {shape_text(right.shape)}",
+                f"shape {shape_text(left.shape)} -> {shape_text(right.shape)}",
+            )
+        )
     if left.dtype != right.dtype:
-        details.append(f"dtype {left.dtype or '?'} -> {right.dtype or '?'}")
-    return "; ".join(details) or "pattern differs"
+        details.append(_text(language, f"dtype {left.dtype or '?'} -> {right.dtype or '?'}", f"dtype {left.dtype or '?'} -> {right.dtype or '?'}"))
+    return "; ".join(details) or _text(language, "模式存在差异", "pattern differs")
 
 
-def _pattern_architecture_hints(snapshot: ModelSnapshot) -> List[str]:
+def _pattern_architecture_hints(snapshot: ModelSnapshot, language: str = "zh") -> List[str]:
     p = snapshot.profile
     layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
     kinds = _profile_layer_kinds(p, layers)
@@ -737,6 +924,11 @@ def _pattern_architecture_hints(snapshot: ModelSnapshot) -> List[str]:
         return []
     linear = [idx for idx, kind in enumerate(kinds) if _is_linear_attention(kind)]
     full = [idx for idx, kind in enumerate(kinds) if not _is_linear_attention(kind)]
+    if _normalize_language(language) == "zh":
+        return [
+            f"架构: DeltaNet 层 {_format_index_ranges(linear)}；GQA 层 {_format_index_ranges(full)}",
+            f"预期 key 分布: linear_attn.* x{len(linear)}；self_attn.* x{len(full)}",
+        ]
     return [
         f"Architecture: DeltaNet layers {_format_index_ranges(linear)}; GQA layers {_format_index_ranges(full)}",
         f"Expected key split: linear_attn.* x{len(linear)}; self_attn.* x{len(full)}",
@@ -952,11 +1144,14 @@ def render_memory(
     seq_len: Optional[int] = None,
     batch_size: int = 1,
     include_kv: bool = True,
+    language: str = "zh",
 ) -> str:
+    language = _normalize_language(language)
     buckets = _memory_buckets(snapshot, seq_len=seq_len, batch_size=batch_size, include_kv=include_kv)
     rows = [[name, format_bytes(value)] for name, value in buckets]
-    rows.append(["TOTAL", format_bytes(sum(value for _, value in buckets))])
-    return markdown_table(["Bucket", "Memory"], rows)
+    rows.append([_text(language, "总计", "TOTAL"), format_bytes(sum(value for _, value in buckets))])
+    headers = ["项目", "显存"] if language == "zh" else ["Bucket", "Memory"]
+    return markdown_table(headers, rows)
 
 
 def render_memory_diff(diff: ModelDiff, seq_len: Optional[int] = None, batch_size: int = 1) -> str:
@@ -1850,12 +2045,12 @@ def _bucket_order(name: str) -> int:
     }.get(name, 99)
 
 
-def _join_sections(sections: Sequence[Tuple[str, str]], output_format: str) -> str:
+def _join_sections(sections: Sequence[Tuple[str, str]], output_format: str, language: str = "zh") -> str:
     if output_format == "html":
         from .formatting import html_page
 
-        text = _join_sections(sections, "markdown")
-        return html_page("Model Viewer Report", text)
+        text = _join_sections(sections, "markdown", language=language)
+        return html_page(_text(language, "模型分析报告", "Model Viewer Report"), text)
     chunks: List[str] = []
     for title, body in sections:
         if output_format == "markdown":

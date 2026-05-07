@@ -11,6 +11,16 @@ from .parsing import load_model
 from .rendering import memory_summary, parse_views, render_diff, render_memory, render_show
 
 
+def _add_language_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--lang",
+        "--language",
+        choices=["zh", "en"],
+        default="zh",
+        help="Output language. Defaults to zh.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mad",
@@ -27,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--format", choices=["term", "markdown", "mermaid", "drawio", "html", "json"], default="term")
     show.add_argument("--layer", type=int, default=0)
     show.add_argument("-o", "--output")
+    _add_language_arg(show)
 
     diff = subparsers.add_parser("diff", help="Compare two models.")
     diff.add_argument("left")
@@ -42,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     diff.add_argument("--fail-on-change", action="store_true", help="Exit 2 when any non-exact diff row exists.")
     diff.add_argument("-o", "--output")
+    _add_language_arg(diff)
 
     snapshot = subparsers.add_parser("snapshot", help="Export normalized model metadata.")
     snapshot.add_argument("model")
@@ -54,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory.add_argument("--batch-size", type=int, default=1)
     memory.add_argument("--format", choices=["term", "markdown", "html", "json"], default="term")
     memory.add_argument("-o", "--output")
+    _add_language_arg(memory)
     return parser
 
 
@@ -63,7 +76,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if args.command == "show":
             snapshot = _load(args.model, args)
-            content = render_show(snapshot, parse_views(args.view), args.format, layer=args.layer)
+            content = render_show(snapshot, parse_views(args.view), args.format, layer=args.layer, language=args.lang)
             _write_or_print(content, args.output)
             _print_warnings(snapshot)
             return 0
@@ -77,7 +90,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 fuzzy_match=args.fuzzy_match,
                 ignore_quantization=args.ignore_quantization,
             )
-            content = render_diff(model_diff, parse_views(args.view), args.format, layer=args.layer)
+            content = render_diff(model_diff, parse_views(args.view), args.format, layer=args.layer, language=args.lang)
             _write_or_print(content, args.output)
             _print_warnings(left)
             _print_warnings(right)
@@ -107,11 +120,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     seq_len=args.seq_len,
                     batch_size=args.batch_size,
                     include_kv=args.mode == "deploy",
+                    language=args.lang,
                 )
             if args.format == "html":
                 from .formatting import html_page
 
-                content = html_page(f"Memory Footprint: {snapshot.name}", content)
+                title = f"显存估算: {snapshot.name}" if args.lang == "zh" else f"Memory Footprint: {snapshot.name}"
+                content = html_page(title, content)
             _write_or_print(content, args.output)
             _print_warnings(snapshot)
             return 0

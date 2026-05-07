@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from model_viewer.cli import build_parser
 from model_viewer.diff import compare_models
 from model_viewer.key_patterns import fold_key_patterns
 from model_viewer.parsing import load_model
@@ -62,6 +63,15 @@ def qwen35_snapshot() -> ModelSnapshot:
 
 
 class ModelViewerTest(unittest.TestCase):
+    def test_cli_language_defaults_to_chinese_and_can_switch_to_english(self):
+        parser = build_parser()
+
+        default_args = parser.parse_args(["diff", "left", "right"])
+        english_args = parser.parse_args(["diff", "left", "right", "--lang", "en"])
+
+        self.assertEqual(default_args.lang, "zh")
+        self.assertEqual(english_args.lang, "en")
+
     def test_config_only_model_is_synthesized(self):
         snapshot = load_model(str(FIXTURES / "model_a"))
 
@@ -153,9 +163,9 @@ class ModelViewerTest(unittest.TestCase):
 
         self.assertIn("flowchart TB", render_show(left, ["overview"], "mermaid"))
         report = render_diff(diff, ["heatmap", "mapping", "memory"], "markdown")
-        self.assertIn("Heatmap", report)
-        self.assertIn("Key Mapping", report)
-        self.assertIn("Memory Footprint", report)
+        self.assertIn("差异热力图", report)
+        self.assertIn("Key 映射", report)
+        self.assertIn("显存估算", report)
 
     def test_key_patterns_fold_numeric_positions(self):
         snapshot = ModelSnapshot(
@@ -172,7 +182,8 @@ class ModelViewerTest(unittest.TestCase):
         self.assertEqual(patterns[0].pattern, "model.layers.{0}.mlp.experts.{0..3}.weight")
         self.assertEqual(patterns[0].count, 4)
         rendered = render_show(snapshot, ["patterns"], "markdown")
-        self.assertIn("Safetensor Key Patterns", rendered)
+        self.assertIn("Safetensors Key 模式", rendered)
+        self.assertIn("Safetensors Key 折叠", rendered)
         self.assertIn("model.layers.{0}.mlp.experts.{0..3}.weight", rendered)
 
     def test_diff_patterns_highlight_fused_pattern_changes(self):
@@ -215,23 +226,28 @@ class ModelViewerTest(unittest.TestCase):
         )
         rendered = render_diff(diff, ["patterns"], "markdown")
 
-        self.assertIn("Safetensor Key Pattern Diff", rendered)
-        self.assertIn("Interpretation:", rendered)
-        self.assertIn("different storage layout, same logical tensors", rendered)
-        self.assertIn("same key pattern and shape/count, but stored dtype differs", rendered)
-        self.assertIn("Conclusion: no unmatched pattern remains", rendered)
-        self.assertIn("linear_attn fusion: in_proj_qkv + in_proj_z -> in_proj_qkvz", rendered)
-        self.assertIn("linear_attn fusion: in_proj_b + in_proj_a -> in_proj_ba", rendered)
-        self.assertIn("MoE expert fusion: expert gate_proj + up_proj -> gate_up_proj", rendered)
-        self.assertIn("MoE expert packing: experts dimension packed into one tensor", rendered)
-        self.assertIn("dtype differs: bf16 -> f32", rendered)
-        self.assertNotIn("Safetensor Key Patterns: left", rendered)
+        self.assertIn("Safetensors Key 模式差异", rendered)
+        self.assertIn("解释:", rendered)
+        self.assertIn("key 名或存储方式不同", rendered)
+        self.assertIn("key 模式、数量和 shape 一致，只是保存精度不同", rendered)
+        self.assertIn("结论: 没有发现未解释的结构差异", rendered)
+        self.assertIn("linear_attn 融合: in_proj_qkv + in_proj_z -> in_proj_qkvz", rendered)
+        self.assertIn("linear_attn 融合: in_proj_b + in_proj_a -> in_proj_ba", rendered)
+        self.assertIn("MoE expert 融合", rendered)
+        self.assertIn("MoE expert 打包", rendered)
+        self.assertIn("dtype 不同: bf16 -> f32", rendered)
+        self.assertNotIn("Safetensors Key 模式: left", rendered)
+
+        rendered_en = render_diff(diff, ["patterns"], "markdown", language="en")
+        self.assertIn("Safetensor Key Pattern Diff", rendered_en)
+        self.assertIn("Interpretation:", rendered_en)
+        self.assertIn("linear_attn fusion: in_proj_qkv + in_proj_z -> in_proj_qkvz", rendered_en)
 
     def test_block_diagram_renders_structure_blocks(self):
         snapshot = load_model(str(FIXTURES / "model_a"))
 
         rendered = render_show(snapshot, ["blocks"], "markdown")
-        self.assertIn("Character Block Diagram", rendered)
+        self.assertIn("字符结构图", rendered)
         self.assertIn("TOKEN EMBEDDING", rendered)
         self.assertIn("LANGUAGE DECODER STACK x 2", rendered)
         self.assertIn("Attention", rendered)
@@ -331,7 +347,7 @@ class ModelViewerTest(unittest.TestCase):
         self.assertIn("in_proj_qkv  [8192,2048]", rendered)
         self.assertIn("experts=256", rendered)
         self.assertIn("shared_expert intermediate=512", rendered)
-        self.assertIn("Architecture: DeltaNet layers", rendered)
+        self.assertIn("架构: DeltaNet 层", rendered)
 
     def test_qwen35_moe_without_layer_metadata_is_not_guessed(self):
         snapshot = ModelSnapshot(

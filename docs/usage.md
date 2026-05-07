@@ -23,6 +23,12 @@ mad --help
 python3 -m pip install -e '.[hub]'
 ```
 
+输出语言默认中文。需要英文报告时，在 `show`、`diff` 或 `memory` 后加 `--lang en`：
+
+```bash
+mad diff /path/to/model_a /path/to/model_b --view patterns --lang en
+```
+
 ## 2. 输入格式
 
 `mad` 的输入可以是模型目录、单个配置文件、safetensors 文件、safetensors index 或快照 JSON。
@@ -343,7 +349,7 @@ mad diff \
 - 常见融合/拆分等价关系，例如 `in_proj_qkv + in_proj_z -> in_proj_qkvz`、`in_proj_a + in_proj_b -> in_proj_ba`、MoE `gate_proj + up_proj -> gate_up_proj`。
 - MoE expert 维度从 `experts.{0..255}.*.weight` 展开到 `[256,...]` 打包 tensor 的差异。
 
-报告会自带 `Interpretation` 小节：
+报告会自带中文 `解释` 小节；需要英文时可加 `--lang en`，会输出 `Interpretation`：
 
 - `equivalent` 表示存储布局不同，但经过已知融合/拆分或 expert 打包后是同一组逻辑权重。
 - `dtype` 表示 key 模式、数量和 shape 一致，只是保存精度不同。
@@ -396,7 +402,7 @@ key 折叠图字段：
 
 | 字段 | 含义 |
 |---|---|
-| `Safetensor Key Folding [311 keys -> 13 patterns]` | 原始 key 数和折叠后的模式数 |
+| `Safetensors Key 折叠 [311 个 key -> 13 个模式]` | 原始 key 数和折叠后的模式数 |
 | `model.layers.{0..27}.self_attn.q_proj.weight` | 数字位置折叠后的 key 模式 |
 | `x28` | 该模式覆盖的真实 key 数 |
 | `[2048,1024] BF16` | 该组 tensor 的 shape 和 dtype |
