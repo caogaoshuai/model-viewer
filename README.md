@@ -118,7 +118,7 @@ mad diff \
 | `--view mapping` | key 映射表 + 结构摘要，显示 exact、fused、tied、left-only、right-only |
 | `--view memory` | 权重、KV Cache、Qwen3.5 State Cache、Vision Encoder 显存估算 |
 | `--view tree` | 折叠后的结构树，展示 GQA group、layer_types、ViT、MTP、MoE |
-| `--view patterns` | safetensors key 折叠图，把数字变化位置折叠成 `{0..N}`，并提示 linear_attn/self_attn 分层 |
+| `--view patterns` | safetensors key 折叠图；diff 时会输出模式级差异，识别 dtype 差异、left/right-only、常见 fuse/split 和 MoE expert 打包 |
 | `--view blocks` | 字符结构图，展示 Embedding、Decoder、Attention、MLP/MoE、混合层调度、ViT/MTP、Norm、LM Head |
 | `--view all` | 输出所有核心视图 |
 | `--ignore-quantization` | diff 时忽略量化 dtype、`.qweight/.packed_weight` 物理打包形状和量化辅助 tensor |

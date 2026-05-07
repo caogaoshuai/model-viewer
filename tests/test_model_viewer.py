@@ -175,6 +175,54 @@ class ModelViewerTest(unittest.TestCase):
         self.assertIn("Safetensor Key Patterns", rendered)
         self.assertIn("model.layers.{0}.mlp.experts.{0..3}.weight", rendered)
 
+    def test_diff_patterns_highlight_fused_pattern_changes(self):
+        left_tensors = []
+        right_tensors = []
+        for layer in (0, 1):
+            prefix = f"model.language_model.layers.{layer}"
+            left_tensors.extend(
+                [
+                    TensorInfo(name=f"{prefix}.linear_attn.in_proj_qkv.weight", shape=(8192, 2048), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.linear_attn.in_proj_z.weight", shape=(4096, 2048), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.linear_attn.in_proj_b.weight", shape=(32, 2048), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.linear_attn.in_proj_a.weight", shape=(32, 2048), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.linear_attn.A_log", shape=(32,), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.linear_attn.norm.weight", shape=(128,), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.mlp.experts.gate_up_proj", shape=(2, 1024, 2048), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.mlp.experts.down_proj", shape=(2, 2048, 512), dtype="bf16"),
+                ]
+            )
+            right_tensors.extend(
+                [
+                    TensorInfo(name=f"{prefix}.linear_attn.in_proj_qkvz.weight", shape=(12288, 2048), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.linear_attn.in_proj_ba.weight", shape=(64, 2048), dtype="bf16"),
+                    TensorInfo(name=f"{prefix}.linear_attn.A_log", shape=(32,), dtype="f32"),
+                    TensorInfo(name=f"{prefix}.linear_attn.norm.weight", shape=(128,), dtype="f32"),
+                ]
+            )
+            for expert in range(2):
+                right_tensors.extend(
+                    [
+                        TensorInfo(name=f"{prefix}.mlp.experts.{expert}.gate_proj.weight", shape=(512, 2048), dtype="bf16"),
+                        TensorInfo(name=f"{prefix}.mlp.experts.{expert}.up_proj.weight", shape=(512, 2048), dtype="bf16"),
+                        TensorInfo(name=f"{prefix}.mlp.experts.{expert}.down_proj.weight", shape=(2048, 512), dtype="bf16"),
+                    ]
+                )
+
+        diff = compare_models(
+            ModelSnapshot(name="left", source="fixture", tensors=left_tensors),
+            ModelSnapshot(name="right", source="fixture", tensors=right_tensors),
+        )
+        rendered = render_diff(diff, ["patterns"], "markdown")
+
+        self.assertIn("Safetensor Key Pattern Diff", rendered)
+        self.assertIn("linear_attn fusion: in_proj_qkv + in_proj_z -> in_proj_qkvz", rendered)
+        self.assertIn("linear_attn fusion: in_proj_b + in_proj_a -> in_proj_ba", rendered)
+        self.assertIn("MoE expert fusion: expert gate_proj + up_proj -> gate_up_proj", rendered)
+        self.assertIn("MoE expert packing: experts dimension packed into one tensor", rendered)
+        self.assertIn("dtype differs: bf16 -> f32", rendered)
+        self.assertNotIn("Safetensor Key Patterns: left", rendered)
+
     def test_block_diagram_renders_structure_blocks(self):
         snapshot = load_model(str(FIXTURES / "model_a"))
 

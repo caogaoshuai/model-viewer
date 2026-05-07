@@ -326,7 +326,7 @@ mad diff \
   --format markdown
 ```
 
-查看两侧 safetensors key 折叠图：
+查看 safetensors key 折叠模式差异：
 
 ```bash
 mad diff \
@@ -335,6 +335,13 @@ mad diff \
   --view patterns \
   --format markdown
 ```
+
+`diff --view patterns` 会先输出模式级差异，而不是简单打印两棵折叠树。它会高亮：
+
+- 只在一侧存在的 key 模式。
+- 相同 key 模式上的 count、shape、dtype 差异。
+- 常见融合/拆分等价关系，例如 `in_proj_qkv + in_proj_z -> in_proj_qkvz`、`in_proj_a + in_proj_b -> in_proj_ba`、MoE `gate_proj + up_proj -> gate_up_proj`。
+- MoE expert 维度从 `experts.{0..255}.*.weight` 展开到 `[256,...]` 打包 tensor 的差异。
 
 查看两侧字符结构图：
 
@@ -363,6 +370,7 @@ mad diff \
 - `heatmap`：在表头前展示 Qwen3.5 的 DeltaNet/GQA 层范围，并把 `linear_attn`、`vision`、`mtp` 作为独立列。
 - `detail`：指定层的真实结构分支，线性层和 GQA 层会显示不同数据流。
 - `mapping`：先给结构摘要，再给 key 级 left-only/right-only/fuzzy mapping。
+- `patterns`：先给 safetensors key 模式差异摘要，再列出模式级 left-only/right-only、dtype 差异和融合/打包等价关系。
 - `memory`：同时对比权重、KV Cache、State Cache 和 Vision Encoder。
 
 ## 8. 输出解读

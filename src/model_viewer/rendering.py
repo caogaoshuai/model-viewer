@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .diff import MappingRow, ModelDiff
 from .formatting import format_bytes, format_params, json_dumps, markdown_table, pct_delta, shape_text
-from .key_patterns import fold_key_patterns
+from .key_patterns import KeyPattern, fold_key_patterns
 from .schema import ModelSnapshot, TensorInfo, dtype_nbytes, normalize_dtype
 
 
@@ -123,8 +123,7 @@ def render_diff(diff: ModelDiff, views: Sequence[str], output_format: str, layer
             sections.append((f"Raw Tree: {diff.left.name}", render_tree(diff.left)))
             sections.append((f"Raw Tree: {diff.right.name}", render_tree(diff.right)))
         elif view == "patterns":
-            sections.append((f"Safetensor Key Patterns: {diff.left.name}", render_key_patterns(diff.left)))
-            sections.append((f"Safetensor Key Patterns: {diff.right.name}", render_key_patterns(diff.right)))
+            sections.append(("Safetensor Key Pattern Diff", render_key_patterns_diff(diff)))
         elif view == "blocks":
             sections.append((f"Character Block Diagram: {diff.left.name}", render_block_diagram(diff.left)))
             sections.append((f"Character Block Diagram: {diff.right.name}", render_block_diagram(diff.right)))
@@ -386,6 +385,312 @@ def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240) -> str:
     if len(patterns) > limit:
         lines.append(f"└── ... {len(patterns) - limit} more patterns")
     return "\n".join(lines)
+
+
+def render_key_patterns_diff(diff: ModelDiff, limit: int = 120) -> str:
+    left_patterns = fold_key_patterns(diff.left)
+    right_patterns = fold_key_patterns(diff.right)
+    rows, summary = _pattern_diff_rows(left_patterns, right_patterns)
+    shown = rows[:limit]
+    lines = [
+        f"Left: {diff.left.name} [{len(diff.left.tensors)} keys -> {len(left_patterns)} patterns]",
+        f"Right: {diff.right.name} [{len(diff.right.tensors)} keys -> {len(right_patterns)} patterns]",
+        "Summary: "
+        + ", ".join(
+            f"{name}={summary.get(name, 0)}"
+            for name in ("exact", "equivalent", "dtype", "shape_or_count", "left_only", "right_only")
+        ),
+    ]
+    if not rows:
+        lines.append("No pattern-level differences.")
+        return "\n".join(lines)
+    lines.append("")
+    lines.append(
+        markdown_table(
+            ["Status", "Left pattern", "Right pattern", "Detail"],
+            [[status, left, right, detail] for status, left, right, detail in shown],
+        )
+    )
+    if len(rows) > limit:
+        lines.append(f"\n... {len(rows) - limit} more pattern differences hidden")
+    lines.append("\nUse `mad show <model> --view patterns` to inspect a full folded tree for one side.")
+    return "\n".join(lines)
+
+
+def _pattern_diff_rows(
+    left_patterns: Sequence[KeyPattern],
+    right_patterns: Sequence[KeyPattern],
+) -> Tuple[List[Tuple[str, str, str, str]], Dict[str, int]]:
+    rows: List[Tuple[str, str, str, str]] = []
+    summary = {
+        "exact": 0,
+        "equivalent": 0,
+        "dtype": 0,
+        "shape_or_count": 0,
+        "left_only": 0,
+        "right_only": 0,
+    }
+    used_left: set[int] = set()
+    used_right: set[int] = set()
+
+    right_exact = {_pattern_signature(pattern): idx for idx, pattern in enumerate(right_patterns)}
+    for left_idx, left_pattern in enumerate(left_patterns):
+        right_idx = right_exact.get(_pattern_signature(left_pattern))
+        if right_idx is None or right_idx in used_right:
+            continue
+        used_left.add(left_idx)
+        used_right.add(right_idx)
+        summary["exact"] += 1
+
+    _append_known_pattern_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary)
+
+    right_by_pattern: Dict[str, List[int]] = defaultdict(list)
+    for idx, pattern in enumerate(right_patterns):
+        if idx not in used_right:
+            right_by_pattern[pattern.pattern].append(idx)
+    for left_idx, left_pattern in enumerate(left_patterns):
+        if left_idx in used_left:
+            continue
+        candidates = [idx for idx in right_by_pattern.get(left_pattern.pattern, []) if idx not in used_right]
+        if not candidates:
+            continue
+        right_idx = _best_pattern_candidate(left_pattern, right_patterns, candidates)
+        right_pattern = right_patterns[right_idx]
+        used_left.add(left_idx)
+        used_right.add(right_idx)
+        if left_pattern.count == right_pattern.count and left_pattern.shape == right_pattern.shape and left_pattern.dtype != right_pattern.dtype:
+            status = "dtype"
+            detail = f"dtype differs: {left_pattern.dtype or '?'} -> {right_pattern.dtype or '?'}"
+            summary["dtype"] += 1
+        else:
+            status = "shape/count"
+            detail = _shape_count_detail(left_pattern, right_pattern)
+            summary["shape_or_count"] += 1
+        rows.append((status, _pattern_brief(left_pattern), _pattern_brief(right_pattern), detail))
+
+    for idx, pattern in enumerate(left_patterns):
+        if idx in used_left:
+            continue
+        rows.append(("left_only", _pattern_brief(pattern), "-", "pattern missing on right"))
+        summary["left_only"] += 1
+    for idx, pattern in enumerate(right_patterns):
+        if idx in used_right:
+            continue
+        rows.append(("right_only", "-", _pattern_brief(pattern), "pattern new on right"))
+        summary["right_only"] += 1
+    return rows, summary
+
+
+def _append_known_pattern_equivalences(
+    left_patterns: Sequence[KeyPattern],
+    right_patterns: Sequence[KeyPattern],
+    used_left: set[int],
+    used_right: set[int],
+    rows: List[Tuple[str, str, str, str]],
+    summary: Dict[str, int],
+) -> None:
+    _append_linear_fusion_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary)
+    _append_linear_fusion_equivalences(right_patterns, left_patterns, used_right, used_left, rows, summary, reverse=True)
+    _append_expert_fusion_equivalences(left_patterns, right_patterns, used_left, used_right, rows, summary)
+    _append_expert_fusion_equivalences(right_patterns, left_patterns, used_right, used_left, rows, summary, reverse=True)
+
+
+def _append_linear_fusion_equivalences(
+    split_patterns: Sequence[KeyPattern],
+    fused_patterns: Sequence[KeyPattern],
+    used_split: set[int],
+    used_fused: set[int],
+    rows: List[Tuple[str, str, str, str]],
+    summary: Dict[str, int],
+    reverse: bool = False,
+) -> None:
+    for suffix, part_suffixes, detail in (
+        (
+            ".linear_attn.in_proj_qkvz.weight",
+            (".linear_attn.in_proj_qkv.weight", ".linear_attn.in_proj_z.weight"),
+            "linear_attn fusion: in_proj_qkv + in_proj_z -> in_proj_qkvz",
+        ),
+        (
+            ".linear_attn.in_proj_ba.weight",
+            (".linear_attn.in_proj_b.weight", ".linear_attn.in_proj_a.weight"),
+            "linear_attn fusion: in_proj_b + in_proj_a -> in_proj_ba",
+        ),
+    ):
+        for fused_idx, fused in enumerate(fused_patterns):
+            if fused_idx in used_fused or not fused.pattern.endswith(suffix):
+                continue
+            prefix = fused.pattern[: -len(suffix)]
+            part_indices = [
+                _find_pattern_index(split_patterns, used_split, prefix + part_suffix)
+                for part_suffix in part_suffixes
+            ]
+            if any(idx is None for idx in part_indices):
+                continue
+            parts = [split_patterns[int(idx)] for idx in part_indices if idx is not None]
+            if not _concat_shape_compatible(parts, fused):
+                continue
+            for idx in part_indices:
+                used_split.add(int(idx))
+            used_fused.add(fused_idx)
+            left_text = _pattern_group_brief(parts) if not reverse else _pattern_brief(fused)
+            right_text = _pattern_brief(fused) if not reverse else _pattern_group_brief(parts)
+            rows.append(("equivalent", left_text, right_text, detail))
+            summary["equivalent"] += 1
+
+
+def _append_expert_fusion_equivalences(
+    fused_patterns: Sequence[KeyPattern],
+    expanded_patterns: Sequence[KeyPattern],
+    used_fused: set[int],
+    used_expanded: set[int],
+    rows: List[Tuple[str, str, str, str]],
+    summary: Dict[str, int],
+    reverse: bool = False,
+) -> None:
+    for fused_idx, fused in enumerate(fused_patterns):
+        if fused_idx in used_fused:
+            continue
+        if ".mlp.experts.gate_up_proj" in fused.pattern:
+            prefix = fused.pattern.split(".mlp.experts.gate_up_proj", 1)[0]
+            gate_idx = _find_expanded_expert_pattern(expanded_patterns, used_expanded, prefix, "gate_proj")
+            up_idx = _find_expanded_expert_pattern(expanded_patterns, used_expanded, prefix, "up_proj")
+            if gate_idx is None or up_idx is None:
+                continue
+            gate = expanded_patterns[gate_idx]
+            up = expanded_patterns[up_idx]
+            if not _expert_gate_up_compatible(fused, gate, up):
+                continue
+            used_fused.add(fused_idx)
+            used_expanded.update({gate_idx, up_idx})
+            detail = "MoE expert fusion: expert gate_proj + up_proj -> gate_up_proj"
+            left_text = _pattern_brief(fused) if not reverse else _pattern_group_brief([gate, up])
+            right_text = _pattern_group_brief([gate, up]) if not reverse else _pattern_brief(fused)
+            rows.append(("equivalent", left_text, right_text, detail))
+            summary["equivalent"] += 1
+        elif ".mlp.experts.down_proj" in fused.pattern:
+            prefix = fused.pattern.split(".mlp.experts.down_proj", 1)[0]
+            down_idx = _find_expanded_expert_pattern(expanded_patterns, used_expanded, prefix, "down_proj")
+            if down_idx is None:
+                continue
+            down = expanded_patterns[down_idx]
+            if not _expert_down_compatible(fused, down):
+                continue
+            used_fused.add(fused_idx)
+            used_expanded.add(down_idx)
+            detail = "MoE expert packing: experts dimension packed into one tensor"
+            left_text = _pattern_brief(fused) if not reverse else _pattern_brief(down)
+            right_text = _pattern_brief(down) if not reverse else _pattern_brief(fused)
+            rows.append(("equivalent", left_text, right_text, detail))
+            summary["equivalent"] += 1
+
+
+def _find_pattern_index(patterns: Sequence[KeyPattern], used: set[int], pattern: str) -> Optional[int]:
+    return next((idx for idx, item in enumerate(patterns) if idx not in used and item.pattern == pattern), None)
+
+
+def _find_expanded_expert_pattern(
+    patterns: Sequence[KeyPattern],
+    used: set[int],
+    prefix: str,
+    module: str,
+) -> Optional[int]:
+    markers = [f"{candidate}.mlp.experts." for candidate in _numeric_singleton_variants(prefix)]
+    suffix = f".{module}.weight"
+    return next(
+        (
+            idx
+            for idx, pattern in enumerate(patterns)
+            if idx not in used
+            and any(pattern.pattern.startswith(marker) for marker in markers)
+            and pattern.pattern.endswith(suffix)
+            and "{0.." in pattern.pattern
+        ),
+        None,
+    )
+
+
+def _concat_shape_compatible(parts: Sequence[KeyPattern], fused: KeyPattern) -> bool:
+    if not parts or any(part.count != fused.count for part in parts):
+        return False
+    if not fused.shape or any(not part.shape for part in parts):
+        return True
+    if len({len(part.shape) for part in parts} | {len(fused.shape)}) != 1:
+        return False
+    rest_same = all(part.shape[1:] == fused.shape[1:] for part in parts)
+    return rest_same and sum(part.shape[0] for part in parts) == fused.shape[0]
+
+
+def _expert_gate_up_compatible(fused: KeyPattern, gate: KeyPattern, up: KeyPattern) -> bool:
+    if not fused.shape or not gate.shape or not up.shape:
+        return gate.count == up.count and fused.count > 0 and gate.count % fused.count == 0
+    if len(fused.shape) != 3 or len(gate.shape) != 2 or len(up.shape) != 2:
+        return False
+    experts, fused_intermediate, hidden = fused.shape
+    return (
+        gate.shape == up.shape
+        and gate.shape[1] == hidden
+        and gate.shape[0] + up.shape[0] == fused_intermediate
+        and fused.count * experts == gate.count == up.count
+    )
+
+
+def _expert_down_compatible(fused: KeyPattern, expanded: KeyPattern) -> bool:
+    if not fused.shape or not expanded.shape:
+        return fused.count > 0 and expanded.count % fused.count == 0
+    if len(fused.shape) != 3 or len(expanded.shape) != 2:
+        return False
+    experts, hidden, intermediate = fused.shape
+    return expanded.shape == (hidden, intermediate) and fused.count * experts == expanded.count
+
+
+def _numeric_singleton_variants(pattern: str) -> List[str]:
+    parts = pattern.split(".")
+    variants = {pattern}
+    singleton = ".".join("{" + part + "}" if part.isdigit() else part for part in parts)
+    variants.add(singleton)
+    plain = ".".join(part[1:-1] if part.startswith("{") and part.endswith("}") and part[1:-1].isdigit() else part for part in parts)
+    variants.add(plain)
+    return sorted(variants)
+
+
+def _best_pattern_candidate(left: KeyPattern, patterns: Sequence[KeyPattern], candidates: Sequence[int]) -> int:
+    return sorted(
+        candidates,
+        key=lambda idx: (
+            patterns[idx].count != left.count,
+            patterns[idx].shape != left.shape,
+            patterns[idx].dtype != left.dtype,
+            patterns[idx].pattern,
+        ),
+    )[0]
+
+
+def _pattern_signature(pattern: KeyPattern) -> Tuple[str, int, Tuple[int, ...], str]:
+    return (pattern.pattern, pattern.count, pattern.shape, pattern.dtype)
+
+
+def _pattern_brief(pattern: KeyPattern) -> str:
+    parts = [pattern.pattern, f"x{pattern.count}"]
+    if pattern.shape:
+        parts.append(shape_text(pattern.shape))
+    if pattern.dtype and pattern.dtype != "unknown":
+        parts.append(pattern.dtype)
+    return "  ".join(parts)
+
+
+def _pattern_group_brief(patterns: Sequence[KeyPattern]) -> str:
+    return "\n".join(_pattern_brief(pattern) for pattern in patterns)
+
+
+def _shape_count_detail(left: KeyPattern, right: KeyPattern) -> str:
+    details = []
+    if left.count != right.count:
+        details.append(f"count {left.count} -> {right.count}")
+    if left.shape != right.shape:
+        details.append(f"shape {shape_text(left.shape)} -> {shape_text(right.shape)}")
+    if left.dtype != right.dtype:
+        details.append(f"dtype {left.dtype or '?'} -> {right.dtype or '?'}")
+    return "; ".join(details) or "pattern differs"
 
 
 def _pattern_architecture_hints(snapshot: ModelSnapshot) -> List[str]:
