@@ -61,6 +61,8 @@ mad show /path/to/model --view overview --format mermaid
 mad show /path/to/model --view detail --layer 0 --format markdown
 ```
 
+对 Qwen3.5，`detail` 会按 `layer_types` 判断当前层类型：例如 `--layer 0` 展示 `DeltaNet / linear_attention`、`linear_attn.in_proj_qkv`、`State Cache`；`--layer 3` 展示 `GQA / full_attention`、`q/k/v/o_proj`、`RoPE`、`KV Cache` 和 `O(T^2)` 工作区。
+
 导出 draw.io XML：
 
 ```bash
@@ -232,6 +234,14 @@ mad memory /path/to/model \
 
 当前显存估算是静态近似值，适合对账权重规模和 KV cache 规模，不等同于真实推理峰值显存。
 
+对 Qwen3.5 这类混合结构，`memory` 会额外拆出：
+
+- `Vision Encoder`：来自 `vision_config` / profile 中的 ViT 参数估算。
+- `KV Cache`：只按 GQA/full attention 层计算，不再默认乘所有层。
+- `State Cache`：DeltaNet/linear attention 层的固定维度状态缓存。
+
+只有 safetensors index、没有 shard 文件时，工具会优先使用 `config.json` / profile 推导权重分桶，避免 memory 视图因为缺少 tensor shape 而退化成全 0。
+
 ## 7. Qwen3-0.6B vs Qwen3-1.7B 示例
 
 下载 metadata 和必要权重：
@@ -287,6 +297,25 @@ mad diff \
   --format markdown
 ```
 
+对比 Qwen3 和 Qwen3.5 时建议先看结构总览，再进入具体层：
+
+```bash
+mad diff \
+  ~/Documents/project/Qwen3-1.7B/config.json \
+  ~/Documents/project/Qwen3.5-0.8B/Qwen3.5-0.8B \
+  --view overview,heatmap,detail,mapping,memory \
+  --layer 3 \
+  --format markdown
+```
+
+这些视图会分别补充：
+
+- `overview`：左侧 Qwen3 的 GQA/SwiGLU/KV cache，右侧 Qwen3.5 的 Hybrid Schedule、DeltaNet/GQA、ViT/MTP。
+- `heatmap`：在表头前展示 Qwen3.5 的 DeltaNet/GQA 层范围，并把 `linear_attn`、`vision`、`mtp` 作为独立列。
+- `detail`：指定层的真实结构分支，线性层和 GQA 层会显示不同数据流。
+- `mapping`：先给结构摘要，再给 key 级 left-only/right-only/fuzzy mapping。
+- `memory`：同时对比权重、KV Cache、State Cache 和 Vision Encoder。
+
 ## 8. 输出解读
 
 | 状态 | 含义 |
@@ -322,6 +351,14 @@ key 折叠图字段：
 | `MTP AUXILIARY HEAD` | 多 token prediction 辅助头，不计入主 decoder 层数 |
 | `FINAL NORM` | 输出前归一化 |
 | `LM HEAD` | 输出头，包含 tied embedding 标记 |
+
+显存字段：
+
+| 字段 | 含义 |
+|---|---|
+| `Vision Encoder` | 多模态模型的 ViT 权重估算 |
+| `KV Cache` | 标准 GQA/full attention 层的 K/V 缓存 |
+| `State Cache` | Qwen3.5 DeltaNet/linear attention 层的状态缓存 |
 
 热力图符号：
 

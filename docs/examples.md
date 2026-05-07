@@ -210,7 +210,53 @@ Qwen3.5-0.8B [qwen3_5 | 752.44M | bf16]
 │  └─ shared_expert intermediate=i_s
 ```
 
-## 范例 9：状态符号约定
+## 范例 9：Qwen3 vs Qwen3.5 多视图摘要
+
+`overview` 会把 Qwen3 的普通 GQA 主干和 Qwen3.5 的混合主干并排：
+
+```mermaid
+flowchart TB
+    subgraph LEFT["Qwen3-1.7B"]
+        L_CARD["layers=28 hidden=2048<br/>vocab=151936 dtype=bf16<br/>params=1.72B"]
+        L_ARCH["GQA heads=16 kv=8 group=2<br/>KV cache layers=28<br/>Dense SwiGLU"]
+        L_CARD --> L_ARCH
+    end
+    subgraph RIGHT["Qwen3.5-0.8B"]
+        R_CARD["layers=24 hidden=1024<br/>vocab=248320 dtype=bf16<br/>params=752.44M"]
+        R_ARCH["Hybrid: DeltaNet=18 GQA=6<br/>macro x6: D+D+D+GQA<br/>KV=6 State=18<br/>ViT + MTP"]
+        R_CARD --> R_ARCH
+    end
+    L_CARD -.->|"params -56.3%"| R_CARD
+    L_ARCH -.->|"structure changed"| R_ARCH
+```
+
+`detail --layer 0` 和 `detail --layer 3` 会显示不同层分支：
+
+```text
+LANGUAGE LAYER 0 [DeltaNet / linear_attention]
+  -> DeltaNet linear_attn in_proj_qkv=[6144,1024] bf16
+     in_proj_a / in_proj_b / in_proj_z + conv1d + A_log + dt_bias
+     no [B,H,T,T] attention matrix; contributes State Cache
+
+LANGUAGE LAYER 3 [GQA / full_attention]
+  -> GQA self_attn q=[2048,1024] k=[512,1024] v=[512,1024] o=[1024,2048]
+     q_norm / k_norm + RoPE; contributes KV Cache and O(T^2) workspace
+```
+
+`memory` 会把 Qwen3.5 的缓存拆开：
+
+```text
+| Bucket | Memory |
+| --- | --- |
+| Embedding | 485.00 MiB |
+| Attention | 445.97 MiB |
+| MLP / MoE | 504.00 MiB |
+| Vision Encoder | 166.57 MiB |
+| KV Cache | 3.00 GiB |
+| State Cache | 18.00 MiB |
+```
+
+## 范例 10：状态符号约定
 
 | 符号 | 含义 |
 |---|---|

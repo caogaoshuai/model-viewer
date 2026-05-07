@@ -11,7 +11,21 @@ from .schema import ModelSnapshot, TensorInfo, dtype_nbytes, normalize_dtype
 
 
 VIEW_ORDER = ("overview", "heatmap", "detail", "mapping", "memory", "tree", "patterns", "blocks")
-MODULES = ("embed", "ln1", "q_proj", "k_proj", "v_proj", "o_proj", "ln2", "gate", "up", "down")
+MODULES = (
+    "embed",
+    "ln1",
+    "linear_attn",
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "ln2",
+    "gate",
+    "up",
+    "down",
+    "vision",
+    "mtp",
+)
 STATUS_GLYPHS = {
     "exact": "░",
     "equivalent": "▓",
@@ -120,16 +134,50 @@ def render_overview_mermaid(snapshot: ModelSnapshot) -> str:
     hidden = profile.get("hidden_size") or "?"
     dtype = _dominant_dtype(snapshot)
     vocab = profile.get("vocab_size") or "?"
-    arch = _arch_label(profile)
     lm_head = "LM Head (tied)" if profile.get("tie_word_embeddings") else "LM Head"
-    return f"""flowchart TB
-    subgraph M["{_esc_mermaid(title)}"]
-        EMB["Embedding<br/>[{vocab},{hidden}] {dtype}"]
-        DEC["Decoder x {layers}<br/>{_esc_mermaid(arch)}"]
-        NORM["Final Norm"]
-        LMH["{lm_head}"]
-        EMB --> DEC --> NORM --> LMH
-    end"""
+    layer_kinds = _profile_layer_kinds(profile, layers)
+    linear_layers = [idx for idx, kind in enumerate(layer_kinds) if _is_linear_attention(kind)]
+    full_layers = [idx for idx, kind in enumerate(layer_kinds) if not _is_linear_attention(kind)]
+    hybrid = bool(linear_layers and full_layers)
+    lines = [
+        "flowchart TB",
+        f"    subgraph M[\"{_esc_mermaid(title)}\"]",
+    ]
+    if _multimodal_input_lines(snapshot, int(profile.get("hidden_size") or 0)):
+        lines.append("        IN[\"Multimodal Router<br/>text + vision tokens\"]")
+        lines.append(f"        VIT[\"Vision Encoder<br/>{_esc_mermaid(_vision_label(snapshot))}\"]")
+        lines.append("        IN --> VIT")
+        lines.append("        IN --> EMB")
+        lines.append("        VIT --> EMB")
+    lines.append(f"        EMB[\"Embedding<br/>[{vocab},{hidden}] {dtype}\"]")
+    if hybrid:
+        lines.extend([
+            f"        SCHED[\"Hybrid Schedule<br/>{_esc_mermaid(_schedule_label(profile, layer_kinds))}\"]",
+            f"        DELTA[\"DeltaNet / linear_attn x {len(linear_layers)}<br/>O(T), State Cache\"]",
+            f"        GQA[\"GQA / self_attn x {len(full_layers)}<br/>{_esc_mermaid(_gqa_label(profile))}<br/>KV Cache + O(T^2)\"]",
+            f"        FFN[\"{_esc_mermaid(_ffn_label(profile))}\"]",
+            "        EMB --> SCHED",
+            "        SCHED --> DELTA --> FFN",
+            "        SCHED --> GQA --> FFN",
+        ])
+        tail = "FFN"
+    else:
+        lines.extend([
+            f"        DEC[\"Decoder x {layers}<br/>{_esc_mermaid(_gqa_label(profile))}<br/>{_esc_mermaid(_ffn_label(profile))}\"]",
+            "        EMB --> DEC",
+        ])
+        tail = "DEC"
+    if _mtp_lines(snapshot):
+        lines.append("        MTP[\"MTP Auxiliary Head<br/>side prediction\"]")
+        lines.append(f"        {tail} --> MTP")
+        tail = "MTP"
+    lines.extend([
+        "        NORM[\"Final Norm\"]",
+        f"        LMH[\"{lm_head}\"]",
+        f"        {tail} --> NORM --> LMH",
+        "    end",
+    ])
+    return "\n".join(lines)
 
 
 def render_diff_overview_mermaid(diff: ModelDiff) -> str:
@@ -138,34 +186,24 @@ def render_diff_overview_mermaid(diff: ModelDiff) -> str:
     summary = diff.summary()
     left_profile = left.profile
     right_profile = right.profile
-    left_layers = int(left_profile.get("num_hidden_layers") or _infer_layer_count(left))
-    right_layers = int(right_profile.get("num_hidden_layers") or _infer_layer_count(right))
+    changed = summary.get("different", 0) + summary.get("left_only", 0) + summary.get("right_only", 0)
     return f"""flowchart TB
     subgraph LEFT["{_esc_mermaid(_model_title(left))}"]
-        L_EMB["Embedding<br/>{_shape_for_module(left, "embed")}"]
-        L_DEC["Decoder x {left_layers}<br/>{_esc_mermaid(_arch_label(left_profile))}"]
-        L_NORM["Final Norm"]
-        L_LMH["LM Head"]
-        L_EMB --> L_DEC --> L_NORM --> L_LMH
+        L_CARD["{_esc_mermaid(_overview_card(left))}"]
+        L_ARCH["{_esc_mermaid(_arch_label(left_profile))}"]
+        L_CARD --> L_ARCH
     end
     subgraph RIGHT["{_esc_mermaid(_model_title(right))}"]
-        R_EMB["Embedding<br/>{_shape_for_module(right, "embed")}"]
-        R_DEC["Decoder x {right_layers}<br/>{_esc_mermaid(_arch_label(right_profile))}"]
-        R_NORM["Final Norm"]
-        R_LMH["LM Head{' (tied)' if right_profile.get('tie_word_embeddings') else ''}"]
-        R_EMB --> R_DEC --> R_NORM --> R_LMH
+        R_CARD["{_esc_mermaid(_overview_card(right))}"]
+        R_ARCH["{_esc_mermaid(_arch_label(right_profile))}"]
+        R_CARD --> R_ARCH
     end
-    L_DEC -.->|"equiv {summary.get('equivalent', 0)} / diff {summary.get('different', 0) + summary.get('left_only', 0) + summary.get('right_only', 0)}"| R_DEC
-    L_LMH -.->|"tied/fused/quant if present"| R_LMH"""
+    L_CARD -.->|"params {pct_delta(left_profile.get('total_params') or left.total_params, right_profile.get('total_params') or right.total_params)}"| R_CARD
+    L_ARCH -.->|"equiv {summary.get('equivalent', 0)} / changed {changed}"| R_ARCH"""
 
 
 def render_overview_drawio(snapshot: ModelSnapshot) -> str:
-    return _drawio_xml(_model_title(snapshot), [
-        ("Embedding", _shape_for_module(snapshot, "embed")),
-        ("Decoder", f"x {snapshot.profile.get('num_hidden_layers') or _infer_layer_count(snapshot)}"),
-        ("Final Norm", ""),
-        ("LM Head", "tied" if snapshot.profile.get("tie_word_embeddings") else ""),
-    ])
+    return _drawio_xml(_model_title(snapshot), _overview_nodes(snapshot))
 
 
 def render_diff_drawio(diff: ModelDiff) -> str:
@@ -173,11 +211,155 @@ def render_diff_drawio(diff: ModelDiff) -> str:
     return _drawio_xml(
         f"{diff.left.name} vs {diff.right.name}",
         [
-            (diff.left.name, _model_brief(diff.left)),
+            (diff.left.name, _overview_card(diff.left)),
             ("Diff", f"exact={summary.get('exact', 0)}, equiv={summary.get('equivalent', 0)}, changed={summary.get('different', 0) + summary.get('left_only', 0) + summary.get('right_only', 0)}"),
-            (diff.right.name, _model_brief(diff.right)),
+            (diff.right.name, _overview_card(diff.right)),
         ],
     )
+
+
+def _overview_nodes(snapshot: ModelSnapshot) -> List[Tuple[str, str]]:
+    p = snapshot.profile
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    layer_kinds = _profile_layer_kinds(p, layers)
+    linear_layers = [idx for idx, kind in enumerate(layer_kinds) if _is_linear_attention(kind)]
+    full_layers = [idx for idx, kind in enumerate(layer_kinds) if not _is_linear_attention(kind)]
+    nodes: List[Tuple[str, str]] = []
+    if _multimodal_input_lines(snapshot, int(p.get("hidden_size") or 0)):
+        nodes.append(("Multimodal Router", _vision_label(snapshot)))
+    nodes.append(("Embedding", _shape_for_module(snapshot, "embed")))
+    if linear_layers and full_layers:
+        nodes.extend([
+            ("Hybrid Schedule", _schedule_label(p, layer_kinds).replace("<br/>", "\n")),
+            ("DeltaNet", f"x{len(linear_layers)}\nState Cache"),
+            ("GQA", f"x{len(full_layers)}\n{_gqa_label(p).replace('<br/>', ' ')}"),
+        ])
+    else:
+        nodes.append(("Decoder", f"x{layers}\n{_gqa_label(p).replace('<br/>', ' ')}"))
+    nodes.append(("FFN", _ffn_label(p).replace("<br/>", "\n")))
+    if _mtp_lines(snapshot):
+        nodes.append(("MTP", "auxiliary side head"))
+    nodes.append(("Final Norm", f"hidden={p.get('hidden_size') or '?'}"))
+    nodes.append(("LM Head", "tied" if p.get("tie_word_embeddings") else _shape_for_module(snapshot, "lm_head")))
+    return nodes
+
+
+def _overview_card(snapshot: ModelSnapshot) -> str:
+    p = snapshot.profile
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    return "<br/>".join([
+        f"layers={layers} hidden={p.get('hidden_size') or '?'}",
+        f"vocab={p.get('vocab_size') or '?'} dtype={_dominant_dtype(snapshot)}",
+        f"params={format_params(p.get('total_params') or snapshot.total_params)}",
+    ])
+
+
+def _structural_compare_rows(left: ModelSnapshot, right: ModelSnapshot) -> List[List[str]]:
+    rows = []
+    for metric, getter in (
+        ("model_type", lambda s: s.profile.get("model_type") or "?"),
+        ("params", lambda s: format_params(s.profile.get("total_params") or s.total_params)),
+        ("layers", lambda s: str(s.profile.get("num_hidden_layers") or _infer_layer_count(s))),
+        ("hidden", lambda s: str(s.profile.get("hidden_size") or "?")),
+        ("vocab", lambda s: str(s.profile.get("vocab_size") or "?")),
+        ("attention", lambda s: _attention_summary(s)),
+        ("ffn", lambda s: _ffn_label(s.profile).replace("<br/>", "; ")),
+        ("cache", lambda s: _cache_summary(s)),
+    ):
+        rows.append([metric, getter(left), getter(right)])
+    return rows
+
+
+def _attention_summary(snapshot: ModelSnapshot) -> str:
+    p = snapshot.profile
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    kinds = _profile_layer_kinds(p, layers)
+    linear = [idx for idx, kind in enumerate(kinds) if _is_linear_attention(kind)]
+    full = [idx for idx, kind in enumerate(kinds) if not _is_linear_attention(kind)]
+    if linear and full:
+        return f"DeltaNet={len(linear)} GQA={len(full)} macro={_macro_summary(kinds)}"
+    return _gqa_label(p).replace("<br/>", "; ")
+
+
+def _cache_summary(snapshot: ModelSnapshot) -> str:
+    p = snapshot.profile
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    kinds = _profile_layer_kinds(p, layers)
+    linear = sum(1 for kind in kinds if _is_linear_attention(kind))
+    kv = int(p.get("num_kv_cache_layers") or layers - linear or layers)
+    if linear:
+        return f"KV={kv}; State={linear}"
+    return f"KV={kv}"
+
+
+def _schedule_label(profile: Dict[str, object], layer_kinds: Sequence[str]) -> str:
+    linear = [idx for idx, kind in enumerate(layer_kinds) if _is_linear_attention(kind)]
+    full = [idx for idx, kind in enumerate(layer_kinds) if not _is_linear_attention(kind)]
+    labels = ["DeltaNet" if _is_linear_attention(kind) else "GQA" for kind in layer_kinds]
+    period = _repeating_period(labels, max_period=16)
+    pieces = [f"DeltaNet={len(linear)} GQA={len(full)}"]
+    if period:
+        macro = " + ".join(period)
+        repeats = len(layer_kinds) // len(period)
+        pieces.append(f"macro x{repeats}: {macro}")
+    kv_layers = int(profile.get("num_kv_cache_layers") or len(full))
+    pieces.append(f"KV layers={kv_layers} State layers={len(linear)}")
+    return "<br/>".join(pieces)
+
+
+def _macro_summary(layer_kinds: Sequence[str]) -> str:
+    labels = ["DeltaNet" if _is_linear_attention(kind) else "GQA" for kind in layer_kinds]
+    period = _repeating_period(labels, max_period=16)
+    if not period:
+        return "custom"
+    return " + ".join(period)
+
+
+def _gqa_label(profile: Dict[str, object]) -> str:
+    heads = int(profile.get("num_attention_heads") or 0)
+    kv_heads = int(profile.get("num_key_value_heads") or heads or 0)
+    head_dim = int(profile.get("head_dim") or 0)
+    ratio = (heads / kv_heads) if heads and kv_heads else 0
+    label = f"GQA heads={heads or '?'} kv={kv_heads or '?'}"
+    if ratio:
+        label += f" group={ratio:g}"
+    if head_dim:
+        label += f" head_dim={head_dim}"
+    kv_layers = profile.get("num_kv_cache_layers")
+    if kv_layers:
+        label += f"<br/>KV cache layers={kv_layers}"
+    return label
+
+
+def _group_ratio_text(profile: Dict[str, object]) -> str:
+    heads = int(profile.get("num_attention_heads") or 0)
+    kv_heads = int(profile.get("num_key_value_heads") or heads or 0)
+    if not heads or not kv_heads:
+        return "?"
+    return f"{heads / kv_heads:g}"
+
+
+def _ffn_label(profile: Dict[str, object]) -> str:
+    experts = int(profile.get("num_experts") or 0)
+    hidden = profile.get("hidden_size") or "?"
+    if experts:
+        active = profile.get("num_experts_per_tok") or "?"
+        moe_i = profile.get("moe_intermediate_size") or "?"
+        shared = int(profile.get("shared_expert_intermediate_size") or 0)
+        suffix = f"<br/>shared={shared}" if shared else ""
+        return f"SwiGLU MoE<br/>experts={experts} active={active} i_e={moe_i}{suffix}"
+    return f"Dense SwiGLU<br/>hidden={hidden} intermediate={profile.get('intermediate_size') or '?'}"
+
+
+def _vision_label(snapshot: ModelSnapshot) -> str:
+    p = snapshot.profile
+    vit = p.get("vit") if isinstance(p.get("vit"), dict) else {}
+    vision = _config_section(snapshot.config, "vision_config")
+    depth = vit.get("depth") or vision.get("depth") or "?"
+    hidden = vit.get("hidden_size") or vision.get("hidden_size") or "?"
+    heads = vit.get("num_heads") or vision.get("num_heads") or "?"
+    out_hidden = vit.get("out_hidden_size") or vision.get("out_hidden_size") or p.get("hidden_size") or "?"
+    return f"ViT x{depth}, hidden={hidden}, heads={heads}, out={out_hidden}"
 
 
 def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240) -> str:
@@ -185,6 +367,9 @@ def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240) -> str:
     lines = [
         f"Safetensor Key Folding [{len(snapshot.tensors)} keys -> {len(patterns)} patterns]",
     ]
+    hints = _pattern_architecture_hints(snapshot)
+    if hints:
+        lines.extend(hints)
     shown = patterns[:limit]
     for idx, pattern in enumerate(shown):
         branch = "└──" if idx == len(shown) - 1 and len(patterns) <= limit else "├──"
@@ -197,6 +382,20 @@ def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240) -> str:
     if len(patterns) > limit:
         lines.append(f"└── ... {len(patterns) - limit} more patterns")
     return "\n".join(lines)
+
+
+def _pattern_architecture_hints(snapshot: ModelSnapshot) -> List[str]:
+    p = snapshot.profile
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    kinds = _profile_layer_kinds(p, layers)
+    if not any(_is_linear_attention(kind) for kind in kinds):
+        return []
+    linear = [idx for idx, kind in enumerate(kinds) if _is_linear_attention(kind)]
+    full = [idx for idx, kind in enumerate(kinds) if not _is_linear_attention(kind)]
+    return [
+        f"Architecture: DeltaNet layers {_format_index_ranges(linear)}; GQA layers {_format_index_ranges(full)}",
+        f"Expected key split: linear_attn.* x{len(linear)}; self_attn.* x{len(full)}",
+    ]
 
 
 def render_block_diagram(snapshot: ModelSnapshot) -> str:
@@ -346,6 +545,7 @@ def render_heatmap(diff: ModelDiff) -> str:
     matrix = _heatmap_matrix(diff)
     layers = sorted(layer for layer in matrix if layer is not None)
     lines = []
+    lines.extend(_diff_schedule_lines(diff))
     header = "layer".ljust(12) + " ".join(module.rjust(8) for module in MODULES) + "   sum"
     lines.append(header)
     if None in matrix:
@@ -371,7 +571,9 @@ def render_mapping(diff: ModelDiff, limit: int = 240) -> str:
         )
     if len(diff.rows) > limit:
         rows.append(["...", "...", "truncated", f"{len(diff.rows) - limit} rows hidden"])
-    return markdown_table(["LEFT key", "RIGHT key", "MATCH", "DETAIL"], rows)
+    summary = markdown_table(["Metric", diff.left.name, diff.right.name], _structural_compare_rows(diff.left, diff.right))
+    mapping = markdown_table(["LEFT key", "RIGHT key", "MATCH", "DETAIL"], rows)
+    return f"{summary}\n\n{mapping}" if summary else mapping
 
 
 def render_layer_detail(left: ModelSnapshot, right: Optional[ModelSnapshot] = None, layer: int = 0) -> str:
@@ -403,7 +605,7 @@ def render_memory(
 
 
 def render_memory_diff(diff: ModelDiff, seq_len: Optional[int] = None, batch_size: int = 1) -> str:
-    left = dict(_memory_buckets(diff.left, seq_len=seq_len, batch_size=batch_size, include_kv=False))
+    left = dict(_memory_buckets(diff.left, seq_len=seq_len, batch_size=batch_size, include_kv=True))
     right = dict(_memory_buckets(diff.right, seq_len=seq_len, batch_size=batch_size, include_kv=True))
     names = sorted(set(left) | set(right), key=_bucket_order)
     rows = []
@@ -438,24 +640,64 @@ def _profile_tree(snapshot: ModelSnapshot) -> str:
     intermediate = p.get("intermediate_size") or "?"
     vocab = p.get("vocab_size") or "?"
     dtype = _dominant_dtype(snapshot)
+    layer_kinds = _profile_layer_kinds(p, layers)
+    linear_layers = [idx for idx, kind in enumerate(layer_kinds) if _is_linear_attention(kind)]
+    full_layers = [idx for idx, kind in enumerate(layer_kinds) if not _is_linear_attention(kind)]
+    embed_name = _first_tensor_name(snapshot, "embed", "model.embed_tokens.weight").replace(".weight", "")
+    norm_name = _first_tensor_name(snapshot, "final_norm", "model.norm.weight").replace(".weight", "")
+    layer_prefix = _layer_prefix(snapshot)
     lines = [
         f"{name} [{format_params(total)} params, {dtype}]",
-        f"├── model.embed_tokens [{vocab}, {hidden}]",
-        f"├── model.layers.[0..{max(0, layers - 1)}] x {layers}",
-        f"│   ├── self_attn q/k/v/o [heads={heads}, kv_heads={kv_heads}]",
-        f"│   ├── mlp gate/up/down [intermediate={intermediate}]",
+        f"├── {embed_name} [{vocab}, {hidden}]",
+    ]
+    multimodal = _multimodal_input_lines(snapshot, int(p.get("hidden_size") or 0))
+    if multimodal:
+        lines.extend([
+            "├── multimodal",
+            f"│   ├── vision_encoder {_vision_label(snapshot)}",
+            "│   └── visual_merger -> language hidden",
+        ])
+    lines.append(f"├── {layer_prefix}.[0..{max(0, layers - 1)}] x {layers}")
+    if linear_layers and full_layers:
+        lines.extend([
+            f"│   ├── layer_types {_schedule_label(p, layer_kinds).replace('<br/>', '; ')}",
+            f"│   ├── DeltaNet layers {_format_index_ranges(linear_layers)}",
+            "│   │   ├── linear_attn in_proj_qkv / in_proj_a / in_proj_b / in_proj_z",
+            "│   │   ├── linear_attn conv1d / A_log / dt_bias / norm / out_proj",
+            "│   │   └── State Cache (no [B,H,T,T] attention matrix)",
+            f"│   ├── GQA layers {_format_index_ranges(full_layers)}",
+            f"│   │   ├── self_attn q/k/v/o [heads={heads}, kv_heads={kv_heads}, group={_group_ratio_text(p)}]",
+            f"│   │   └── KV Cache layers={p.get('num_kv_cache_layers') or len(full_layers)}",
+        ])
+    else:
+        lines.extend([
+            f"│   ├── self_attn q/k/v/o [heads={heads}, kv_heads={kv_heads}, group={_group_ratio_text(p)}]",
+            f"│   ├── KV Cache layers={p.get('num_kv_cache_layers') or layers}",
+        ])
+    if int(p.get("num_experts") or 0):
+        lines.extend([
+            f"│   ├── moe router experts={p.get('num_experts')} active={p.get('num_experts_per_tok')}",
+            f"│   ├── experts.[0..{int(p.get('num_experts') or 1) - 1}] gate/up/down [intermediate={p.get('moe_intermediate_size') or '?'}]",
+        ])
+        if int(p.get("shared_expert_intermediate_size") or 0):
+            lines.append(f"│   ├── shared_expert [intermediate={p.get('shared_expert_intermediate_size')}]")
+    else:
+        lines.append(f"│   ├── dense_swiglu_mlp gate/up/down [intermediate={intermediate}]")
+    lines.extend([
         "│   ├── input_layernorm",
         "│   └── post_attention_layernorm",
-        f"├── model.norm [{hidden}]",
-    ]
+    ])
+    if _mtp_lines(snapshot):
+        lines.extend([
+            "├── mtp",
+            "│   ├── mtp.layers.[0..0] self_attn + dense_swiglu_mlp",
+            "│   └── mtp.fc / mtp.norm / pre_fc_norm_*",
+        ])
+    lines.append(f"├── {norm_name} [{hidden}]")
     if p.get("tie_word_embeddings"):
         lines.append("└── lm_head (tied with embedding)")
     else:
         lines.append(f"└── lm_head [{vocab}, {hidden}]")
-    if int(p.get("num_experts") or 0):
-        lines.insert(4, f"│   ├── moe experts={p.get('num_experts')} active={p.get('num_experts_per_tok')}")
-    if int(p.get("num_linear_attn_layers") or 0):
-        lines.insert(4, f"│   ├── layer_types linear={p.get('num_linear_attn_layers')} full={p.get('num_standard_attn_layers')}")
     return "\n".join(lines)
 
 
@@ -473,22 +715,77 @@ def _single_layer_detail(snapshot: ModelSnapshot, layer: int) -> str:
     by_module = defaultdict(list)
     for tensor in tensors:
         by_module[tensor.module].append(tensor)
+    p = snapshot.profile
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    layer_kinds = _profile_layer_kinds(p, layers)
+    kind = layer_kinds[layer] if 0 <= layer < len(layer_kinds) else "full_attention"
+    hidden = int(p.get("hidden_size") or 0)
+    heads = int(p.get("num_attention_heads") or 0)
+    kv_heads = int(p.get("num_key_value_heads") or heads or 0)
+    head_dim = int(p.get("head_dim") or (hidden // max(1, heads)) if hidden else 0)
+    q_dim = heads * head_dim if heads and head_dim else hidden
+    kv_dim = kv_heads * head_dim if kv_heads and head_dim else hidden
+    intermediate = int(p.get("intermediate_size") or 0)
+    linear_key_heads = int(p.get("linear_num_key_heads") or 0)
+    linear_value_heads = int(p.get("linear_num_value_heads") or 0)
+    linear_key_dim = int(p.get("linear_key_head_dim") or 0)
+    linear_value_dim = int(p.get("linear_value_head_dim") or 0)
+    dtype = _dominant_dtype(snapshot)
+    q_shape = _module_shapes_or(by_module, "q_proj", _shape_tuple(q_dim, hidden), dtype)
+    k_shape = _module_shapes_or(by_module, "k_proj", _shape_tuple(kv_dim, hidden), dtype)
+    v_shape = _module_shapes_or(by_module, "v_proj", _shape_tuple(kv_dim, hidden), dtype)
+    o_shape = _module_shapes_or(by_module, "o_proj", _shape_tuple(hidden, q_dim), dtype)
+    linear_qkv = _module_shapes_or(
+        by_module,
+        "qkv_proj",
+        _shape_tuple((linear_key_heads * linear_key_dim) + (2 * linear_value_heads * linear_value_dim), hidden),
+        dtype,
+    )
+    ln_shape = _module_shapes_or(by_module, "ln1", _shape_tuple(hidden), dtype)
+    post_ln_shape = _module_shapes_or(by_module, "ln2", _shape_tuple(hidden), dtype)
+    gate_shape = _module_shapes_or(by_module, "gate", _shape_tuple(intermediate, hidden), dtype)
+    up_shape = _module_shapes_or(by_module, "up", _shape_tuple(intermediate, hidden), dtype)
+    down_shape = _module_shapes_or(by_module, "down", _shape_tuple(hidden, intermediate), dtype)
     lines = [
-        f"DECODER BLOCK layer {layer}",
-        f"  hidden={snapshot.profile.get('hidden_size', '?')} heads={snapshot.profile.get('num_attention_heads', '?')} kv_heads={snapshot.profile.get('num_key_value_heads', '?')}",
+        f"LANGUAGE LAYER {layer} [{_layer_kind_label(kind)}]",
+        f"  hidden={p.get('hidden_size', '?')} heads={p.get('num_attention_heads', '?')} kv_heads={p.get('num_key_value_heads', '?')} group={_group_ratio_text(p)}",
         "  input",
-        f"    -> RMSNorm { _module_shapes(by_module, 'ln1') }",
-        f"    -> Attention q={_module_shapes(by_module, 'q_proj')} k={_module_shapes(by_module, 'k_proj')} v={_module_shapes(by_module, 'v_proj')} o={_module_shapes(by_module, 'o_proj')}",
-        f"    -> MLP gate={_module_shapes(by_module, 'gate')} up={_module_shapes(by_module, 'up')} down={_module_shapes(by_module, 'down')}",
-        "    -> residual output",
+        f"    -> RMSNorm {ln_shape}",
     ]
+    if _is_linear_attention(kind):
+        lines.extend([
+            f"    -> DeltaNet linear_attn in_proj_qkv={linear_qkv}",
+            "       in_proj_a / in_proj_b / in_proj_z + conv1d + A_log + dt_bias",
+            f"       linear_heads k={linear_key_heads or '?'}x{linear_key_dim or '?'} v={linear_value_heads or '?'}x{linear_value_dim or '?'}",
+            "       no [B,H,T,T] attention matrix; contributes State Cache",
+        ])
+    else:
+        lines.extend([
+            f"    -> GQA self_attn q={q_shape} k={k_shape} v={v_shape} o={o_shape}",
+            "       q_norm / k_norm + RoPE; contributes KV Cache and O(T^2) workspace",
+        ])
+    lines.extend([
+        "    -> Residual Add",
+        f"    -> RMSNorm {post_ln_shape}",
+    ])
+    if int(p.get("num_experts") or 0):
+        lines.extend([
+            f"    -> SwiGLU MoE router experts={p.get('num_experts')} active={p.get('num_experts_per_tok')}",
+            f"       experts.[0..{int(p.get('num_experts') or 1) - 1}] gate/up/down intermediate={p.get('moe_intermediate_size') or '?'}",
+        ])
+    else:
+        lines.append(f"    -> Dense SwiGLU MLP gate={gate_shape} up={up_shape} down={down_shape}")
+    lines.append("    -> residual output")
     return "\n".join(lines)
 
 
 def _diff_layer_detail(left: ModelSnapshot, right: ModelSnapshot, layer: int) -> str:
     left_modules = _layer_module_shapes(left, layer)
     right_modules = _layer_module_shapes(right, layer)
-    rows = []
+    rows = [
+        ["layer_kind", _layer_kind_at(left, layer), _layer_kind_at(right, layer)],
+        ["architecture", _arch_label(left.profile), _arch_label(right.profile)],
+    ]
     for module in MODULES:
         if module == "embed":
             continue
@@ -502,17 +799,36 @@ def _memory_buckets(
     batch_size: int = 1,
     include_kv: bool = True,
 ) -> List[Tuple[str, float]]:
+    profile_buckets = _profile_weight_buckets(snapshot)
+    tensor_params = snapshot.total_params
+    profile_params = float(snapshot.profile.get("total_params") or 0)
+    use_profile = bool(profile_buckets and (tensor_params == 0 or tensor_params < profile_params * 0.5 or _is_hybrid_snapshot(snapshot)))
+    if use_profile:
+        buckets = defaultdict(float, profile_buckets)
+        if include_kv:
+            kv_cache = _estimate_kv_cache(snapshot, seq_len=seq_len, batch_size=batch_size)
+            if kv_cache:
+                buckets["KV Cache"] += kv_cache
+            state_cache = _estimate_state_cache(snapshot, batch_size=batch_size)
+            if state_cache:
+                buckets["State Cache"] += state_cache
+        return [(name, buckets[name]) for name in sorted(buckets, key=_bucket_order)]
+
     buckets: Dict[str, float] = defaultdict(float)
     for tensor in snapshot.tensors:
         module = tensor.module
         if module == "embed":
             bucket = "Embedding"
-        elif module in {"q_proj", "k_proj", "v_proj", "qkv_proj", "o_proj"} or ".linear_attn." in tensor.name:
+        elif module in {"q_proj", "k_proj", "v_proj", "qkv_proj", "o_proj", "linear_attn"} or ".linear_attn." in tensor.name:
             bucket = "Attention"
         elif module in {"gate", "up", "gate_up", "down"} or tensor.kind in {"expert", "router"}:
             bucket = "MLP / MoE"
         elif module == "lm_head":
             bucket = "LM Head"
+        elif module == "vision" or ".visual." in tensor.name:
+            bucket = "Vision Encoder"
+        elif module == "mtp" or tensor.name.startswith("mtp."):
+            bucket = "MTP"
         elif tensor.kind == "norm" or module in {"ln1", "ln2", "final_norm"}:
             bucket = "Norms"
         elif tensor.kind == "quant_aux":
@@ -523,7 +839,58 @@ def _memory_buckets(
     kv_cache = _estimate_kv_cache(snapshot, seq_len=seq_len, batch_size=batch_size) if include_kv else 0.0
     if kv_cache:
         buckets["KV Cache"] += kv_cache
+    state_cache = _estimate_state_cache(snapshot, batch_size=batch_size) if include_kv else 0.0
+    if state_cache:
+        buckets["State Cache"] += state_cache
     return [(name, buckets[name]) for name in sorted(buckets, key=_bucket_order)]
+
+
+def _profile_weight_buckets(snapshot: ModelSnapshot) -> Dict[str, float]:
+    p = snapshot.profile
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    hidden = int(p.get("hidden_size") or 0)
+    vocab = int(p.get("vocab_size") or 0)
+    heads = int(p.get("num_attention_heads") or 0)
+    kv_heads = int(p.get("num_key_value_heads") or heads or 0)
+    head_dim = int(p.get("head_dim") or (hidden // max(1, heads)) if hidden else 0)
+    intermediate = int(p.get("intermediate_size") or 0)
+    if not (layers and hidden):
+        return {}
+
+    dtype = _dominant_dtype(snapshot)
+    nbytes = dtype_nbytes(dtype) or 2.0
+    layer_kinds = _profile_layer_kinds(p, layers)
+    linear_count = sum(1 for kind in layer_kinds if _is_linear_attention(kind))
+    full_count = layers - linear_count
+    q_dim = heads * head_dim if heads and head_dim else hidden
+    kv_dim = kv_heads * head_dim if kv_heads and head_dim else hidden
+    standard_attn = int(p.get("standard_attention_params_per_layer") or 0)
+    if not standard_attn:
+        standard_attn = hidden * (q_dim + 2 * kv_dim) + q_dim * hidden
+    linear_attn = int(p.get("linear_attention_params_per_layer") or 0)
+    if not linear_attn:
+        linear_attn = standard_attn
+
+    experts = int(p.get("num_experts") or 0)
+    moe_i = int(p.get("moe_intermediate_size") or 0)
+    shared = int(p.get("shared_expert_intermediate_size") or 0)
+    if experts and moe_i:
+        mlp_per_layer = experts * 3 * hidden * moe_i + hidden * experts + 3 * hidden * shared
+    else:
+        mlp_per_layer = 3 * hidden * intermediate
+
+    buckets: Dict[str, float] = defaultdict(float)
+    buckets["Embedding"] = vocab * hidden * nbytes
+    buckets["Attention"] = (full_count * standard_attn + linear_count * linear_attn) * nbytes
+    buckets["MLP / MoE"] = layers * mlp_per_layer * nbytes
+    buckets["Norms"] = (2 * layers * hidden + hidden) * nbytes
+    if not p.get("tie_word_embeddings"):
+        buckets["LM Head"] = vocab * hidden * nbytes
+    vit = p.get("vit") if isinstance(p.get("vit"), dict) else {}
+    vit_params = int(vit.get("params") or 0)
+    if vit_params:
+        buckets["Vision Encoder"] = vit_params * nbytes
+    return buckets
 
 
 def _estimate_kv_cache(snapshot: ModelSnapshot, seq_len: Optional[int], batch_size: int) -> float:
@@ -539,6 +906,22 @@ def _estimate_kv_cache(snapshot: ModelSnapshot, seq_len: Optional[int], batch_si
     return float(batch_size * length * layers * 2 * kv_heads * head_dim * nbytes)
 
 
+def _estimate_state_cache(snapshot: ModelSnapshot, batch_size: int) -> float:
+    p = snapshot.profile
+    layers = int(p.get("num_linear_attn_layers") or 0)
+    if not layers:
+        return 0.0
+    heads = int(p.get("linear_num_key_heads") or p.get("num_attention_heads") or 0)
+    key_dim = int(p.get("linear_key_head_dim") or p.get("head_dim") or 0)
+    value_dim = int(p.get("linear_value_head_dim") or key_dim or 0)
+    state_dim = max(key_dim, value_dim)
+    if not heads or not state_dim:
+        return 0.0
+    dtype = _dominant_dtype(snapshot)
+    nbytes = dtype_nbytes(dtype) or 2.0
+    return float(batch_size * layers * heads * state_dim * state_dim * nbytes * 2)
+
+
 def _heatmap_matrix(diff: ModelDiff) -> Dict[Optional[int], Dict[str, str]]:
     matrix: Dict[Optional[int], Dict[str, str]] = defaultdict(lambda: {module: "none" for module in MODULES})
     for row in diff.rows:
@@ -552,6 +935,23 @@ def _heatmap_matrix(diff: ModelDiff) -> Dict[Optional[int], Dict[str, str]]:
             old = matrix[target_layer][module]
             matrix[target_layer][module] = _worse_status(old, row.status)
     return matrix
+
+
+def _diff_schedule_lines(diff: ModelDiff) -> List[str]:
+    lines = []
+    for label, snapshot in (("left", diff.left), ("right", diff.right)):
+        p = snapshot.profile
+        layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+        kinds = _profile_layer_kinds(p, layers)
+        if any(_is_linear_attention(kind) for kind in kinds):
+            linear = [idx for idx, kind in enumerate(kinds) if _is_linear_attention(kind)]
+            full = [idx for idx, kind in enumerate(kinds) if not _is_linear_attention(kind)]
+            lines.append(
+                f"{label} layer_types: DeltaNet {_format_index_ranges(linear)}; GQA {_format_index_ranges(full)}"
+            )
+    if lines:
+        lines.append("")
+    return lines
 
 
 def _expand_modules(modules: Iterable[str]) -> List[str]:
@@ -610,6 +1010,19 @@ def _module_shapes(by_module: Dict[str, List[TensorInfo]], module: str) -> str:
     return ", ".join(f"{shape_text(tensor.shape)} {tensor.dtype}" for tensor in tensors[:3])
 
 
+def _module_shapes_or(
+    by_module: Dict[str, List[TensorInfo]],
+    module: str,
+    fallback_shape: Tuple[int, ...],
+    fallback_dtype: str,
+) -> str:
+    tensors = by_module.get(module) or []
+    known = [tensor for tensor in tensors if tensor.shape]
+    if known:
+        return ", ".join(f"{shape_text(tensor.shape)} {tensor.dtype}" for tensor in known[:3])
+    return f"{shape_text(fallback_shape)} {fallback_dtype}"
+
+
 def _first_shape(snapshot: ModelSnapshot, module: str) -> Tuple[int, ...]:
     tensor = next((item for item in snapshot.tensors if item.module == module and item.shape), None)
     return tensor.shape if tensor is not None else ()
@@ -618,6 +1031,13 @@ def _first_shape(snapshot: ModelSnapshot, module: str) -> Tuple[int, ...]:
 def _first_tensor_name(snapshot: ModelSnapshot, module: str, fallback: str) -> str:
     tensor = next((item for item in snapshot.tensors if item.module == module), None)
     return tensor.name if tensor is not None else fallback
+
+
+def _layer_prefix(snapshot: ModelSnapshot) -> str:
+    tensor = next((item for item in snapshot.tensors if item.layer is not None and ".layers." in item.name), None)
+    if tensor is None:
+        return "model.layers"
+    return tensor.name.split(".layers.", 1)[0] + ".layers"
 
 
 def _first_shape_by_name(snapshot: ModelSnapshot, marker: str) -> Tuple[int, ...]:
@@ -655,6 +1075,25 @@ def _profile_layer_kinds(profile: Dict[str, object], layers: int) -> List[str]:
 def _is_linear_attention(kind: object) -> bool:
     value = str(kind).lower()
     return "linear" in value or "delta" in value
+
+
+def _layer_kind_label(kind: object) -> str:
+    return "DeltaNet / linear_attention" if _is_linear_attention(kind) else "GQA / full_attention"
+
+
+def _layer_kind_at(snapshot: ModelSnapshot, layer: int) -> str:
+    layers = int(snapshot.profile.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    kinds = _profile_layer_kinds(snapshot.profile, layers)
+    if 0 <= layer < len(kinds):
+        return _layer_kind_label(kinds[layer])
+    return "?"
+
+
+def _is_hybrid_snapshot(snapshot: ModelSnapshot) -> bool:
+    p = snapshot.profile
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    kinds = _profile_layer_kinds(p, layers)
+    return any(_is_linear_attention(kind) for kind in kinds) and any(not _is_linear_attention(kind) for kind in kinds)
 
 
 def _layer_schedule_lines(
@@ -900,11 +1339,65 @@ def _layer_module_shapes(snapshot: ModelSnapshot, layer: int) -> Dict[str, str]:
     for tensor in snapshot.tensors:
         if tensor.layer == layer:
             by_module[tensor.module].append(tensor)
-    return {module: _module_shapes(by_module, module) for module in by_module}
+    return {module: _layer_module_shape(snapshot, by_module, module) for module in by_module}
+
+
+def _layer_module_shape(snapshot: ModelSnapshot, by_module: Dict[str, List[TensorInfo]], module: str) -> str:
+    p = snapshot.profile
+    hidden = int(p.get("hidden_size") or 0)
+    heads = int(p.get("num_attention_heads") or 0)
+    kv_heads = int(p.get("num_key_value_heads") or heads or 0)
+    head_dim = int(p.get("head_dim") or (hidden // max(1, heads)) if hidden else 0)
+    intermediate = int(p.get("intermediate_size") or 0)
+    q_dim = heads * head_dim if heads and head_dim else hidden
+    kv_dim = kv_heads * head_dim if kv_heads and head_dim else hidden
+    linear_key_heads = int(p.get("linear_num_key_heads") or 0)
+    linear_value_heads = int(p.get("linear_num_value_heads") or 0)
+    linear_key_dim = int(p.get("linear_key_head_dim") or 0)
+    linear_value_dim = int(p.get("linear_value_head_dim") or 0)
+    linear_qkv = (linear_key_heads * linear_key_dim) + (2 * linear_value_heads * linear_value_dim)
+    fallback = {
+        "ln1": _shape_tuple(hidden),
+        "ln2": _shape_tuple(hidden),
+        "q_proj": _shape_tuple(q_dim, hidden),
+        "k_proj": _shape_tuple(kv_dim, hidden),
+        "v_proj": _shape_tuple(kv_dim, hidden),
+        "o_proj": _shape_tuple(hidden, q_dim),
+        "qkv_proj": _shape_tuple(linear_qkv, hidden),
+        "gate": _shape_tuple(intermediate, hidden),
+        "up": _shape_tuple(intermediate, hidden),
+        "down": _shape_tuple(hidden, intermediate),
+    }.get(module, ())
+    return _module_shapes_or(by_module, module, fallback, _dominant_dtype(snapshot))
 
 
 def _shape_for_module(snapshot: ModelSnapshot, module: str) -> str:
     tensor = next((item for item in snapshot.tensors if item.module == module), None)
+    if tensor is not None and tensor.shape:
+        return f"{shape_text(tensor.shape)} {tensor.dtype}"
+    p = snapshot.profile
+    hidden = int(p.get("hidden_size") or 0)
+    vocab = int(p.get("vocab_size") or 0)
+    heads = int(p.get("num_attention_heads") or 0)
+    kv_heads = int(p.get("num_key_value_heads") or heads or 0)
+    head_dim = int(p.get("head_dim") or (hidden // max(1, heads)) if hidden else 0)
+    intermediate = int(p.get("intermediate_size") or 0)
+    q_dim = heads * head_dim if heads and head_dim else hidden
+    kv_dim = kv_heads * head_dim if kv_heads and head_dim else hidden
+    fallback = {
+        "embed": _shape_tuple(vocab, hidden),
+        "final_norm": _shape_tuple(hidden),
+        "lm_head": _shape_tuple(vocab, hidden),
+        "q_proj": _shape_tuple(q_dim, hidden),
+        "k_proj": _shape_tuple(kv_dim, hidden),
+        "v_proj": _shape_tuple(kv_dim, hidden),
+        "o_proj": _shape_tuple(hidden, q_dim),
+        "gate": _shape_tuple(intermediate, hidden),
+        "up": _shape_tuple(intermediate, hidden),
+        "down": _shape_tuple(hidden, intermediate),
+    }.get(module, ())
+    if fallback:
+        return f"{shape_text(fallback)} {_dominant_dtype(snapshot)}"
     if tensor is None:
         return "?"
     return f"{shape_text(tensor.shape)} {tensor.dtype}"
@@ -951,14 +1444,11 @@ def _infer_layer_count(snapshot: ModelSnapshot) -> int:
 
 
 def _arch_label(profile: Dict[str, object]) -> str:
-    parts = []
-    if int(profile.get("num_experts") or 0):
-        parts.append(f"MoE experts={profile.get('num_experts')}")
-    else:
-        parts.append("q/k/v/o + gate/up/down")
-    if int(profile.get("num_linear_attn_layers") or 0):
-        parts.append(f"linear-attn={profile.get('num_linear_attn_layers')}")
-    return ", ".join(parts)
+    layers = int(profile.get("num_hidden_layers") or 0)
+    kinds = _profile_layer_kinds(profile, layers) if layers else []
+    if kinds and any(_is_linear_attention(kind) for kind in kinds):
+        return f"Hybrid: {_schedule_label(profile, kinds).replace('<br/>', ', ')}; {_ffn_label(profile).replace('<br/>', ', ')}"
+    return f"{_gqa_label(profile).replace('<br/>', ', ')}; {_ffn_label(profile).replace('<br/>', ', ')}"
 
 
 def _model_title(snapshot: ModelSnapshot) -> str:
@@ -976,10 +1466,13 @@ def _bucket_order(name: str) -> int:
         "Attention": 1,
         "MLP / MoE": 2,
         "Norms": 3,
-        "LM Head": 4,
-        "Quant Aux": 5,
-        "KV Cache": 6,
-        "Other": 7,
+        "Vision Encoder": 4,
+        "MTP": 5,
+        "LM Head": 6,
+        "Quant Aux": 7,
+        "KV Cache": 8,
+        "State Cache": 9,
+        "Other": 10,
     }.get(name, 99)
 
 

@@ -103,13 +103,13 @@ mad diff \
 
 | 参数 | 说明 |
 |---|---|
-| `--view overview` | Mermaid 模型框图 |
+| `--view overview` | Mermaid 模型框图；Qwen3 显示 GQA/SwiGLU/KV cache，Qwen3.5 显示 Hybrid Schedule、DeltaNet/GQA、ViT/MTP |
 | `--view heatmap` | diff 热力图，只用于 `mad diff` |
-| `--view detail --layer 0` | 单层模块形状对比 |
-| `--view mapping` | key 映射表，显示 exact、fused、tied、left-only、right-only |
-| `--view memory` | 权重和 KV cache 显存估算 |
-| `--view tree` | 折叠后的结构树 |
-| `--view patterns` | safetensors key 折叠图，把数字变化位置折叠成 `{0..N}` |
+| `--view detail --layer 0` | 单层模块形状对比；Qwen3.5 会按层号区分 DeltaNet 层和 GQA 层 |
+| `--view mapping` | key 映射表 + 结构摘要，显示 exact、fused、tied、left-only、right-only |
+| `--view memory` | 权重、KV Cache、Qwen3.5 State Cache、Vision Encoder 显存估算 |
+| `--view tree` | 折叠后的结构树，展示 GQA group、layer_types、ViT、MTP、MoE |
+| `--view patterns` | safetensors key 折叠图，把数字变化位置折叠成 `{0..N}`，并提示 linear_attn/self_attn 分层 |
 | `--view blocks` | 字符结构图，展示 Embedding、Decoder、Attention、MLP/MoE、混合层调度、ViT/MTP、Norm、LM Head |
 | `--view all` | 输出所有核心视图 |
 | `--format markdown` | 适合写报告或贴文档 |

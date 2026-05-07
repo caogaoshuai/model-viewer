@@ -11,6 +11,54 @@ from model_viewer.schema import ModelSnapshot, TensorInfo
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def qwen35_snapshot() -> ModelSnapshot:
+    return ModelSnapshot(
+        name="qwen3_5_hybrid",
+        source="fixture",
+        profile={
+            "model_type": "qwen3_5",
+            "total_params": 1000,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 4,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 1,
+            "head_dim": 4,
+            "vocab_size": 128,
+            "tie_word_embeddings": True,
+            "layer_kinds": ["linear_attention", "linear_attention", "linear_attention", "full_attention"],
+            "num_linear_attn_layers": 3,
+            "num_standard_attn_layers": 1,
+            "num_kv_cache_layers": 1,
+            "full_attention_interval": 4,
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 2,
+            "linear_key_head_dim": 8,
+            "linear_value_head_dim": 8,
+            "linear_attention_params_per_layer": 128,
+            "standard_attention_params_per_layer": 64,
+            "attn_output_gate": True,
+            "num_experts": 8,
+            "num_experts_per_tok": 2,
+            "moe_intermediate_size": 4,
+            "shared_expert_intermediate_size": 4,
+            "is_multimodal": True,
+            "vit": {
+                "depth": 2,
+                "hidden_size": 12,
+                "num_heads": 3,
+                "intermediate_size": 24,
+                "patch_size": 16,
+                "spatial_merge_size": 2,
+                "temporal_patch_size": 2,
+                "out_hidden_size": 16,
+                "params": 100,
+            },
+            "mtp_num_layers": 1,
+        },
+    )
+
+
 class ModelViewerTest(unittest.TestCase):
     def test_config_only_model_is_synthesized(self):
         snapshot = load_model(str(FIXTURES / "model_a"))
@@ -72,48 +120,7 @@ class ModelViewerTest(unittest.TestCase):
         self.assertIn("MLP", rendered)
 
     def test_block_diagram_renders_qwen35_hybrid_structure(self):
-        snapshot = ModelSnapshot(
-            name="qwen3_5_hybrid",
-            source="fixture",
-            profile={
-                "model_type": "qwen3_5",
-                "total_params": 1000,
-                "hidden_size": 16,
-                "intermediate_size": 32,
-                "num_hidden_layers": 4,
-                "num_attention_heads": 4,
-                "num_key_value_heads": 1,
-                "head_dim": 4,
-                "vocab_size": 128,
-                "tie_word_embeddings": True,
-                "layer_kinds": ["linear_attention", "linear_attention", "linear_attention", "full_attention"],
-                "num_linear_attn_layers": 3,
-                "num_standard_attn_layers": 1,
-                "num_kv_cache_layers": 1,
-                "full_attention_interval": 4,
-                "linear_num_key_heads": 2,
-                "linear_num_value_heads": 2,
-                "linear_key_head_dim": 8,
-                "linear_value_head_dim": 8,
-                "attn_output_gate": True,
-                "num_experts": 8,
-                "num_experts_per_tok": 2,
-                "moe_intermediate_size": 4,
-                "shared_expert_intermediate_size": 4,
-                "is_multimodal": True,
-                "vit": {
-                    "depth": 2,
-                    "hidden_size": 12,
-                    "num_heads": 3,
-                    "intermediate_size": 24,
-                    "patch_size": 16,
-                    "spatial_merge_size": 2,
-                    "temporal_patch_size": 2,
-                    "out_hidden_size": 16,
-                },
-                "mtp_num_layers": 1,
-            },
-        )
+        snapshot = qwen35_snapshot()
 
         rendered = render_show(snapshot, ["blocks"], "markdown")
         self.assertIn("MULTIMODAL INPUT ROUTER", rendered)
@@ -128,6 +135,28 @@ class ModelViewerTest(unittest.TestCase):
         self.assertIn("experts=8", rendered)
         self.assertIn("active=2", rendered)
         self.assertIn("MTP AUXILIARY HEAD", rendered)
+
+    def test_qwen35_views_render_hybrid_details_beyond_blocks(self):
+        snapshot = qwen35_snapshot()
+
+        overview = render_show(snapshot, ["overview"], "markdown")
+        tree = render_show(snapshot, ["tree"], "markdown")
+        delta_detail = render_show(snapshot, ["detail"], "markdown", layer=0)
+        gqa_detail = render_show(snapshot, ["detail"], "markdown", layer=3)
+        memory = render_show(snapshot, ["memory"], "markdown")
+
+        self.assertIn("Hybrid Schedule", overview)
+        self.assertIn("DeltaNet / linear_attn x 3", overview)
+        self.assertIn("Vision Encoder", overview)
+        self.assertIn("DeltaNet layers {0..2}", tree)
+        self.assertIn("GQA layers {3}", tree)
+        self.assertIn("State Cache", tree)
+        self.assertIn("LANGUAGE LAYER 0 [DeltaNet / linear_attention]", delta_detail)
+        self.assertIn("linear_attn in_proj_qkv", delta_detail)
+        self.assertIn("LANGUAGE LAYER 3 [GQA / full_attention]", gqa_detail)
+        self.assertIn("GQA self_attn", gqa_detail)
+        self.assertIn("Vision Encoder", memory)
+        self.assertIn("State Cache", memory)
 
 
 if __name__ == "__main__":

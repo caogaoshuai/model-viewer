@@ -590,6 +590,10 @@ def _layer_index(name: str) -> Optional[int]:
 
 
 def _module_name(canonical_name: str) -> str:
+    if canonical_name.startswith("mtp."):
+        return "mtp"
+    if ".visual." in canonical_name:
+        return "vision"
     aliases = {
         "embed_tokens": "embed",
         "wte": "embed",
@@ -617,6 +621,8 @@ def _module_name(canonical_name: str) -> str:
     for part in reversed(parts):
         if part in aliases:
             return aliases[part]
+    if ".linear_attn." in canonical_name:
+        return "linear_attn"
     if "embed_tokens" in canonical_name:
         return "embed"
     if canonical_name.startswith("lm_head"):
