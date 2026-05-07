@@ -17,7 +17,7 @@
 | 能力 | 说明 |
 |---|---|
 | 字符 tree + 折叠语法 | 精确表达每一层 / 每个 tensor 的 shape、dtype、参数量；同构层自动折叠 |
-| 多视图渲染 | Overview / Heatmap / Layer Detail / Key Mapping / Memory / Raw Tree / Key Patterns |
+| 多视图渲染 | Overview / Heatmap / Layer Detail / Key Mapping / Memory / Raw Tree / Key Patterns / Blocks |
 | 多维度 Diff | 结构 / 命名 / 参数量 / 异构层 / 显存 五个维度对比 |
 | 量化感知 | 自动识别 GPTQ / AWQ / fp8 / LoRA 的辅助 tensor，归属到主 weight |
 | MoE / 混合注意力 | 专家组折叠、State Cache 估算、`[A]/[L]` 层标记 |
@@ -72,6 +72,9 @@ mad memory /path/to/model --mode deploy --seq-len 40960 --batch-size 1
 
 # 6. 展示 safetensors key 折叠图
 mad show /path/to/model --view patterns --format markdown
+
+# 7. 展示字符结构图，直观看每个结构块
+mad show /path/to/model --view blocks --format markdown
 ```
 
 ### 对比 Qwen3-0.6B 和 Qwen3-1.7B
@@ -107,6 +110,7 @@ mad diff \
 | `--view memory` | 权重和 KV cache 显存估算 |
 | `--view tree` | 折叠后的结构树 |
 | `--view patterns` | safetensors key 折叠图，把数字变化位置折叠成 `{0..N}` |
+| `--view blocks` | 字符结构图，展示 Embedding、Decoder、Attention、MLP、Norm、LM Head |
 | `--view all` | 输出所有核心视图 |
 | `--format markdown` | 适合写报告或贴文档 |
 | `--format json` | 适合 CI 消费 |
@@ -140,3 +144,20 @@ model.layers.{0}.mlp.experts.{0..63}.weight  x64
 ```
 
 连续数字会显示成 `{0..63}`；固定数字但属于同一折叠组时显示成 `{0}`；不连续数字会显示成 `{0..3,28..31}`。
+
+### 字符结构图
+
+`blocks` 视图用字符盒图展示模型主干和 Decoder Block 内部结构，适合快速看清结构块和数据流：
+
+```bash
+mad show /path/to/model --view blocks --format markdown
+```
+
+输出会包含：
+
+- `TOKEN EMBEDDING`
+- `DECODER BLOCK x N`
+- `Attention` 下的 `q_proj / k_proj / v_proj / o_proj`
+- `MLP` 或 `MoE MLP`
+- `FINAL NORM`
+- `LM HEAD`

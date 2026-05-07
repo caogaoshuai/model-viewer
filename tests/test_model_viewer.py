@@ -61,6 +61,16 @@ class ModelViewerTest(unittest.TestCase):
         self.assertIn("Safetensor Key Patterns", rendered)
         self.assertIn("model.layers.{0}.mlp.experts.{0..3}.weight", rendered)
 
+    def test_block_diagram_renders_structure_blocks(self):
+        snapshot = load_model(str(FIXTURES / "model_a"))
+
+        rendered = render_show(snapshot, ["blocks"], "markdown")
+        self.assertIn("Character Block Diagram", rendered)
+        self.assertIn("TOKEN EMBEDDING", rendered)
+        self.assertIn("DECODER BLOCK x 2", rendered)
+        self.assertIn("Attention", rendered)
+        self.assertIn("MLP", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

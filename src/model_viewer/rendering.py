@@ -10,7 +10,7 @@ from .key_patterns import fold_key_patterns
 from .schema import ModelSnapshot, TensorInfo, dtype_nbytes
 
 
-VIEW_ORDER = ("overview", "heatmap", "detail", "mapping", "memory", "tree", "patterns")
+VIEW_ORDER = ("overview", "heatmap", "detail", "mapping", "memory", "tree", "patterns", "blocks")
 MODULES = ("embed", "ln1", "q_proj", "k_proj", "v_proj", "o_proj", "ln2", "gate", "up", "down")
 STATUS_GLYPHS = {
     "exact": "░",
@@ -55,6 +55,8 @@ def render_show(snapshot: ModelSnapshot, views: Sequence[str], output_format: st
             sections.append(("Raw Tree", render_tree(snapshot)))
         elif view == "patterns":
             sections.append(("Safetensor Key Patterns", render_key_patterns(snapshot)))
+        elif view == "blocks":
+            sections.append(("Character Block Diagram", render_block_diagram(snapshot)))
         elif view in {"heatmap", "mapping"}:
             sections.append((view.title(), f"{view} is available for diff output."))
     return _join_sections(sections, output_format)
@@ -105,6 +107,9 @@ def render_diff(diff: ModelDiff, views: Sequence[str], output_format: str, layer
         elif view == "patterns":
             sections.append((f"Safetensor Key Patterns: {diff.left.name}", render_key_patterns(diff.left)))
             sections.append((f"Safetensor Key Patterns: {diff.right.name}", render_key_patterns(diff.right)))
+        elif view == "blocks":
+            sections.append((f"Character Block Diagram: {diff.left.name}", render_block_diagram(diff.left)))
+            sections.append((f"Character Block Diagram: {diff.right.name}", render_block_diagram(diff.right)))
     return _join_sections(sections, output_format)
 
 
@@ -192,6 +197,76 @@ def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240) -> str:
     if len(patterns) > limit:
         lines.append(f"└── ... {len(patterns) - limit} more patterns")
     return "\n".join(lines)
+
+
+def render_block_diagram(snapshot: ModelSnapshot) -> str:
+    p = snapshot.profile
+    dtype = _dominant_dtype(snapshot)
+    layers = int(p.get("num_hidden_layers") or _infer_layer_count(snapshot))
+    hidden = int(p.get("hidden_size") or 0)
+    intermediate = int(p.get("intermediate_size") or 0)
+    heads = int(p.get("num_attention_heads") or 0)
+    kv_heads = int(p.get("num_key_value_heads") or heads or 0)
+    head_dim = int(p.get("head_dim") or (hidden // max(1, heads)) if hidden else 0)
+    q_dim = heads * head_dim if heads and head_dim else hidden
+    kv_dim = kv_heads * head_dim if kv_heads and head_dim else hidden
+    vocab = int(p.get("vocab_size") or 0)
+    is_tied = bool(p.get("tie_word_embeddings"))
+    num_experts = int(p.get("num_experts") or 0)
+    experts_per_tok = int(p.get("num_experts_per_tok") or 0)
+    moe_intermediate = int(p.get("moe_intermediate_size") or 0)
+
+    embed_shape = _first_shape(snapshot, "embed") or _shape_tuple(vocab, hidden)
+    norm_shape = _first_shape(snapshot, "final_norm") or _shape_tuple(hidden)
+    q_shape = _first_shape(snapshot, "q_proj") or _shape_tuple(q_dim, hidden)
+    k_shape = _first_shape(snapshot, "k_proj") or _shape_tuple(kv_dim, hidden)
+    v_shape = _first_shape(snapshot, "v_proj") or _shape_tuple(kv_dim, hidden)
+    o_shape = _first_shape(snapshot, "o_proj") or _shape_tuple(hidden, q_dim)
+    gate_shape = _first_shape(snapshot, "gate") or _shape_tuple(intermediate, hidden)
+    up_shape = _first_shape(snapshot, "up") or _shape_tuple(intermediate, hidden)
+    down_shape = _first_shape(snapshot, "down") or _shape_tuple(hidden, intermediate)
+    lm_head_shape = _first_shape(snapshot, "lm_head") or _shape_tuple(vocab, hidden)
+
+    title = f"{snapshot.name} [{p.get('model_type') or 'model'} | {format_params(p.get('total_params') or snapshot.total_params)} | {dtype}]"
+    lines = [
+        title,
+        "",
+        _box("TOKEN EMBEDDING", [
+            f"model.embed_tokens.weight  {shape_text(embed_shape)}  {dtype}",
+            f"vocab={vocab or '?'}  hidden={hidden or '?'}",
+        ]),
+        "        │",
+        "        ▼",
+        _box(f"DECODER BLOCK x {layers}", _decoder_block_lines(
+            hidden=hidden,
+            heads=heads,
+            kv_heads=kv_heads,
+            head_dim=head_dim,
+            q_shape=q_shape,
+            k_shape=k_shape,
+            v_shape=v_shape,
+            o_shape=o_shape,
+            gate_shape=gate_shape,
+            up_shape=up_shape,
+            down_shape=down_shape,
+            num_experts=num_experts,
+            experts_per_tok=experts_per_tok,
+            moe_intermediate=moe_intermediate,
+            dtype=dtype,
+        )),
+        "        │",
+        "        ▼",
+        _box("FINAL NORM", [
+            f"model.norm.weight  {shape_text(norm_shape)}  {dtype}",
+        ]),
+        "        │",
+        "        ▼",
+        _box("LM HEAD", [
+            "(tied with embedding)" if is_tied else f"lm_head.weight  {shape_text(lm_head_shape)}  {dtype}",
+            "checkpoint may still store lm_head.weight separately" if is_tied and _first_shape(snapshot, "lm_head") else "",
+        ]),
+    ]
+    return "\n".join(line for line in lines if line != "")
 
 
 def render_key_patterns_drawio(snapshot: ModelSnapshot) -> str:
@@ -473,6 +548,92 @@ def _module_shapes(by_module: Dict[str, List[TensorInfo]], module: str) -> str:
     if not tensors:
         return "-"
     return ", ".join(f"{shape_text(tensor.shape)} {tensor.dtype}" for tensor in tensors[:3])
+
+
+def _first_shape(snapshot: ModelSnapshot, module: str) -> Tuple[int, ...]:
+    tensor = next((item for item in snapshot.tensors if item.module == module and item.shape), None)
+    return tensor.shape if tensor is not None else ()
+
+
+def _shape_tuple(*values: int) -> Tuple[int, ...]:
+    if not values or any(not value for value in values):
+        return ()
+    return tuple(int(value) for value in values)
+
+
+def _decoder_block_lines(
+    hidden: int,
+    heads: int,
+    kv_heads: int,
+    head_dim: int,
+    q_shape: Tuple[int, ...],
+    k_shape: Tuple[int, ...],
+    v_shape: Tuple[int, ...],
+    o_shape: Tuple[int, ...],
+    gate_shape: Tuple[int, ...],
+    up_shape: Tuple[int, ...],
+    down_shape: Tuple[int, ...],
+    num_experts: int,
+    experts_per_tok: int,
+    moe_intermediate: int,
+    dtype: str,
+) -> List[str]:
+    lines = [
+        f"input hidden state: B x T x {hidden or '?'}",
+        "│",
+        "├─ RMSNorm: input_layernorm.weight",
+        "│",
+        "├─ Attention",
+        f"│  ├─ q_proj  {shape_text(q_shape)}  heads={heads or '?'}",
+        f"│  ├─ k_proj  {shape_text(k_shape)}  kv_heads={kv_heads or '?'}",
+        f"│  ├─ v_proj  {shape_text(v_shape)}  head_dim={head_dim or '?'}",
+        f"│  ├─ q_norm / k_norm  {dtype}",
+        f"│  └─ o_proj  {shape_text(o_shape)}",
+        "│",
+        "├─ Residual Add",
+        "│",
+        "├─ RMSNorm: post_attention_layernorm.weight",
+        "│",
+    ]
+    if num_experts:
+        lines.extend([
+            "├─ MoE MLP",
+            f"│  ├─ router  experts={num_experts}  active={experts_per_tok or '?'}",
+            f"│  ├─ expert gate/up  [{moe_intermediate or '?'},{hidden or '?'}]",
+            f"│  └─ expert down     [{hidden or '?'},{moe_intermediate or '?'}]",
+        ])
+    else:
+        lines.extend([
+            "├─ MLP",
+            f"│  ├─ gate_proj  {shape_text(gate_shape)}",
+            f"│  ├─ up_proj    {shape_text(up_shape)}",
+            f"│  └─ down_proj  {shape_text(down_shape)}",
+        ])
+    lines.extend([
+        "│",
+        "└─ Residual Add -> next layer",
+    ])
+    return lines
+
+
+def _box(title: str, body: Sequence[str], width: int = 72) -> str:
+    top = "┌" + "─" * (width - 2) + "┐"
+    bottom = "└" + "─" * (width - 2) + "┘"
+    title_line = _box_line(title, width)
+    content = [top, title_line, "├" + "─" * (width - 2) + "┤"]
+    for line in body:
+        if line:
+            content.append(_box_line(line, width))
+    content.append(bottom)
+    return "\n".join(content)
+
+
+def _box_line(text: str, width: int) -> str:
+    value = str(text)
+    available = width - 4
+    if len(value) > available:
+        value = value[: max(0, available - 3)] + "..."
+    return "│ " + value.ljust(available) + " │"
 
 
 def _layer_module_shapes(snapshot: ModelSnapshot, layer: int) -> Dict[str, str]:

@@ -94,6 +94,36 @@ model.layers.{0}.mlp.experts.{0..63}.weight  x64
 - 不连续数字显示为 `{0..3,28..31}`。
 - shape 或 dtype 不同时会拆成不同折叠组，避免隐藏真实结构差异。
 
+输出字符结构图：
+
+```bash
+mad show /path/to/model --view blocks --format markdown
+```
+
+`blocks` 视图用纯字符盒图展示主干数据流和每个 Decoder Block 内部结构块，例如：
+
+```text
+TOKEN EMBEDDING
+        │
+        ▼
+DECODER BLOCK x 28
+├─ RMSNorm
+├─ Attention
+│  ├─ q_proj
+│  ├─ k_proj
+│  ├─ v_proj
+│  └─ o_proj
+├─ Residual Add
+├─ RMSNorm
+├─ MLP
+│  ├─ gate_proj
+│  ├─ up_proj
+│  └─ down_proj
+└─ Residual Add -> next layer
+```
+
+对 MoE 模型，MLP 区域会显示 router、expert 数和 active expert 数。
+
 ## 4. 对比两个模型
 
 基础对比：
@@ -209,6 +239,16 @@ mad diff \
   --format markdown
 ```
 
+查看两侧字符结构图：
+
+```bash
+mad diff \
+  ~/Documents/project/Qwen3-0.6B/config.json \
+  ~/Documents/project/Qwen3-1.7B/config.json \
+  --view blocks \
+  --format markdown
+```
+
 ## 8. 输出解读
 
 | 状态 | 含义 |
@@ -228,6 +268,17 @@ key 折叠图字段：
 | `model.layers.{0..27}.self_attn.q_proj.weight` | 数字位置折叠后的 key 模式 |
 | `x28` | 该模式覆盖的真实 key 数 |
 | `[2048,1024] BF16` | 该组 tensor 的 shape 和 dtype |
+
+字符结构图字段：
+
+| 字段 | 含义 |
+|---|---|
+| `TOKEN EMBEDDING` | 词表 embedding 入口 |
+| `DECODER BLOCK x 28` | 重复的 decoder 层数 |
+| `Attention` | Q/K/V/O 投影与 head 配置 |
+| `MLP` | gate/up/down 或 MoE experts |
+| `FINAL NORM` | 输出前归一化 |
+| `LM HEAD` | 输出头，包含 tied embedding 标记 |
 
 热力图符号：
 
