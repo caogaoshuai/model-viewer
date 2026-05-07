@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("--format", choices=["term", "markdown", "mermaid", "drawio", "html", "json"], default="term")
     diff.add_argument("--layer", type=int, default=0)
     diff.add_argument("--fuzzy-match", action="store_true", help="Detect fused qkv/gate_up and tied lm_head mappings.")
+    diff.add_argument(
+        "--ignore-quantization",
+        action="store_true",
+        help="Ignore quantization dtype, packed weight shape, and auxiliary tensor differences.",
+    )
     diff.add_argument("--fail-on-change", action="store_true", help="Exit 2 when any non-exact diff row exists.")
     diff.add_argument("-o", "--output")
 
@@ -66,7 +71,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "diff":
             left = _load(args.left, args)
             right = _load(args.right, args)
-            model_diff = compare_models(left, right, fuzzy_match=args.fuzzy_match)
+            model_diff = compare_models(
+                left,
+                right,
+                fuzzy_match=args.fuzzy_match,
+                ignore_quantization=args.ignore_quantization,
+            )
             content = render_diff(model_diff, parse_views(args.view), args.format, layer=args.layer)
             _write_or_print(content, args.output)
             _print_warnings(left)

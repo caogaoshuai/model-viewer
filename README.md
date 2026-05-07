@@ -66,6 +66,13 @@ mad show /path/to/model --view overview --format mermaid
 # 3. 对比两个模型，输出完整报告
 mad diff /path/to/model_a /path/to/model_b --view all --fuzzy-match -o model-diff.md
 
+# 3.1 训练态 vs 量化部署态：忽略量化 dtype、packed weight 和 scales/zeros 等辅助 tensor
+mad diff /train/model /deploy-int4/model \
+  --view all \
+  --fuzzy-match \
+  --ignore-quantization \
+  -o model-diff.md
+
 # 4. 导出快照，后续可以离线 diff
 mad snapshot /path/to/model -o model.snapshot.json
 
@@ -114,6 +121,7 @@ mad diff \
 | `--view patterns` | safetensors key 折叠图，把数字变化位置折叠成 `{0..N}`，并提示 linear_attn/self_attn 分层 |
 | `--view blocks` | 字符结构图，展示 Embedding、Decoder、Attention、MLP/MoE、混合层调度、ViT/MTP、Norm、LM Head |
 | `--view all` | 输出所有核心视图 |
+| `--ignore-quantization` | diff 时忽略量化 dtype、`.qweight/.packed_weight` 物理打包形状和量化辅助 tensor |
 | `--format markdown` | 适合写报告或贴文档 |
 | `--format json` | 适合 CI 消费 |
 | `--format drawio` | 输出 draw.io XML |

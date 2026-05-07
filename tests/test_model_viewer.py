@@ -82,6 +82,70 @@ class ModelViewerTest(unittest.TestCase):
         self.assertTrue(any("tied with embedding" in reason for reason in reasons))
         self.assertEqual(diff.summary()["auxiliary"], 1)
 
+    def test_diff_can_ignore_quantization_noise(self):
+        left = ModelSnapshot(
+            name="bf16",
+            source="fixture",
+            tensors=[
+                TensorInfo(
+                    name="model.layers.0.self_attn.o_proj.weight",
+                    shape=(16, 16),
+                    dtype="bf16",
+                    layer=0,
+                    module="o_proj",
+                    canonical_name="model.layers.0.self_attn.o_proj.weight",
+                ),
+                TensorInfo(
+                    name="model.layers.0.mlp.down_proj.weight",
+                    shape=(16, 32),
+                    dtype="bf16",
+                    layer=0,
+                    module="down",
+                    canonical_name="model.layers.0.mlp.down_proj.weight",
+                ),
+            ],
+        )
+        right = ModelSnapshot(
+            name="int4",
+            source="fixture",
+            tensors=[
+                TensorInfo(
+                    name="model.layers.0.self_attn.o_proj.qweight",
+                    shape=(16, 2),
+                    dtype="int4",
+                    layer=0,
+                    module="o_proj",
+                    canonical_name="model.layers.0.self_attn.o_proj.weight",
+                ),
+                TensorInfo(
+                    name="model.layers.0.mlp.down_proj.weight",
+                    shape=(16, 32),
+                    dtype="int4",
+                    layer=0,
+                    module="down",
+                    canonical_name="model.layers.0.mlp.down_proj.weight",
+                ),
+                TensorInfo(
+                    name="model.layers.0.self_attn.o_proj.scales",
+                    shape=(16,),
+                    dtype="fp16",
+                    kind="quant_aux",
+                    layer=0,
+                    module="o_proj",
+                    canonical_name="model.layers.0.self_attn.o_proj.weight",
+                    parent="model.layers.0.self_attn.o_proj.weight",
+                ),
+            ],
+        )
+
+        diff = compare_models(left, right, ignore_quantization=True)
+
+        self.assertFalse(diff.has_change)
+        self.assertEqual(diff.summary()["auxiliary"], 0)
+        self.assertEqual(diff.summary()["different"], 0)
+        self.assertTrue(all(row.status == "exact" for row in diff.rows))
+        self.assertTrue(all("quantization ignored" in row.reason for row in diff.rows))
+
     def test_renderers_produce_core_views(self):
         left = load_model(str(FIXTURES / "model_a"))
         right = load_model(str(FIXTURES / "fused_b.json"))

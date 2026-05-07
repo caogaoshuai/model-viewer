@@ -215,6 +215,25 @@ mad diff /train/model /deploy/model --view all --fuzzy-match -o train-vs-deploy.
 - `lm_head.weight` 和 embedding tied 的等价关系
 - 量化产生的 `scales`、`zeros`、`g_idx` 等辅助 tensor
 
+如果目标是比较“逻辑结构”，不希望量化因素影响 diff 和 `--fail-on-change`，加上 `--ignore-quantization`：
+
+```bash
+mad diff /train/model /deploy-int4/model \
+  --view all \
+  --fuzzy-match \
+  --ignore-quantization \
+  --fail-on-change \
+  -o train-vs-quant.md
+```
+
+`--ignore-quantization` 会忽略：
+
+- 量化 dtype 差异，例如 `bf16 -> int4/int8/fp8`。
+- 量化物理打包导致的 shape 差异，例如 `.qweight`、`.packed_weight`。
+- 量化辅助 tensor，例如 `scales`、`zeros`、`qzeros`、`g_idx`、`weight_scale`。
+
+它不会忽略真实结构差异，例如层数、hidden size、专家数、未匹配的非量化权重 key。`qkv_proj`、`gate_up_proj` 和 tied embedding 这类语义等价关系仍由 `--fuzzy-match` 负责识别。
+
 CI 中可以用 JSON 输出和失败码：
 
 ```bash
@@ -356,6 +375,8 @@ mad diff \
 | `left_only` | 只存在于左侧模型 |
 | `right_only` | 只存在于右侧模型 |
 | `auxiliary` | 量化辅助 tensor |
+
+启用 `--ignore-quantization` 后，量化 dtype、packed weight 和辅助 tensor 不再计入变化；因此它们不会触发 `--fail-on-change`。
 
 key 折叠图字段：
 

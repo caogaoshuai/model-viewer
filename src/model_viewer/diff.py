@@ -30,6 +30,7 @@ class ModelDiff:
     right: ModelSnapshot
     rows: List[MappingRow]
     fuzzy_match: bool = False
+    ignore_quantization: bool = False
 
     @property
     def has_change(self) -> bool:
@@ -49,7 +50,12 @@ class ModelDiff:
         return counts
 
 
-def compare_models(left: ModelSnapshot, right: ModelSnapshot, fuzzy_match: bool = False) -> ModelDiff:
+def compare_models(
+    left: ModelSnapshot,
+    right: ModelSnapshot,
+    fuzzy_match: bool = False,
+    ignore_quantization: bool = False,
+) -> ModelDiff:
     left_primary = _primary_by_name(left)
     right_primary = _primary_by_name(right)
     unmatched_left: Set[str] = set(left_primary)
@@ -59,18 +65,47 @@ def compare_models(left: ModelSnapshot, right: ModelSnapshot, fuzzy_match: bool 
     for name in sorted(unmatched_left & unmatched_right):
         left_tensor = left_primary[name]
         right_tensor = right_primary[name]
-        rows.append(_compare_row([left_tensor], [right_tensor], "exact key"))
+        rows.append(
+            _compare_row(
+                [left_tensor],
+                [right_tensor],
+                "exact key",
+                ignore_quantization=ignore_quantization,
+            )
+        )
         unmatched_left.remove(name)
         unmatched_right.remove(name)
 
-    _match_canonical(left_primary, right_primary, unmatched_left, unmatched_right, rows)
+    _match_canonical(
+        left_primary,
+        right_primary,
+        unmatched_left,
+        unmatched_right,
+        rows,
+        ignore_quantization=ignore_quantization,
+    )
 
     if fuzzy_match:
-        _match_fused_qkv(left_primary, right_primary, unmatched_left, unmatched_right, rows)
-        _match_fused_gate_up(left_primary, right_primary, unmatched_left, unmatched_right, rows)
+        _match_fused_qkv(
+            left_primary,
+            right_primary,
+            unmatched_left,
+            unmatched_right,
+            rows,
+            ignore_quantization=ignore_quantization,
+        )
+        _match_fused_gate_up(
+            left_primary,
+            right_primary,
+            unmatched_left,
+            unmatched_right,
+            rows,
+            ignore_quantization=ignore_quantization,
+        )
         _match_tied_lm_head(left_primary, right_primary, unmatched_left, unmatched_right, rows)
 
-    _append_auxiliary_rows(left, right, rows)
+    if not ignore_quantization:
+        _append_auxiliary_rows(left, right, rows)
 
     for name in sorted(unmatched_left):
         tensor = left_primary[name]
@@ -100,6 +135,7 @@ def compare_models(left: ModelSnapshot, right: ModelSnapshot, fuzzy_match: bool 
         right=right,
         rows=sorted(rows, key=_row_sort_key),
         fuzzy_match=fuzzy_match,
+        ignore_quantization=ignore_quantization,
     )
 
 
@@ -113,6 +149,7 @@ def _match_canonical(
     unmatched_left: Set[str],
     unmatched_right: Set[str],
     rows: List[MappingRow],
+    ignore_quantization: bool = False,
 ) -> None:
     right_by_canonical: Dict[str, str] = {}
     for name in unmatched_right:
@@ -126,7 +163,14 @@ def _match_canonical(
         if right_name is None or right_name not in unmatched_right:
             continue
         right_tensor = right_primary[right_name]
-        rows.append(_compare_row([left_tensor], [right_tensor], "canonical key"))
+        rows.append(
+            _compare_row(
+                [left_tensor],
+                [right_tensor],
+                "canonical key",
+                ignore_quantization=ignore_quantization,
+            )
+        )
         unmatched_left.remove(left_name)
         unmatched_right.remove(right_name)
 
@@ -137,6 +181,7 @@ def _match_fused_qkv(
     unmatched_left: Set[str],
     unmatched_right: Set[str],
     rows: List[MappingRow],
+    ignore_quantization: bool = False,
 ) -> None:
     left_by_layer = _by_layer_module(left_primary, unmatched_left)
     right_by_layer = _by_layer_module(right_primary, unmatched_right)
@@ -152,7 +197,14 @@ def _match_fused_qkv(
             continue
         left_group = [left_primary[name] for name in qkv_names if name is not None]
         right_tensor = right_primary[right_name]
-        rows.append(_compare_fused_row(left_group, [right_tensor], "fused q+k+v"))
+        rows.append(
+            _compare_fused_row(
+                left_group,
+                [right_tensor],
+                "fused q+k+v",
+                ignore_quantization=ignore_quantization,
+            )
+        )
         for name in qkv_names:
             unmatched_left.remove(name)
         unmatched_right.remove(right_name)
@@ -164,6 +216,7 @@ def _match_fused_gate_up(
     unmatched_left: Set[str],
     unmatched_right: Set[str],
     rows: List[MappingRow],
+    ignore_quantization: bool = False,
 ) -> None:
     left_by_layer = _by_layer_module(left_primary, unmatched_left)
     right_by_layer = _by_layer_module(right_primary, unmatched_right)
@@ -179,7 +232,14 @@ def _match_fused_gate_up(
             continue
         left_group = [left_primary[name] for name in names if name is not None]
         right_tensor = right_primary[right_name]
-        rows.append(_compare_fused_row(left_group, [right_tensor], "fused gate+up"))
+        rows.append(
+            _compare_fused_row(
+                left_group,
+                [right_tensor],
+                "fused gate+up",
+                ignore_quantization=ignore_quantization,
+            )
+        )
         for name in names:
             unmatched_left.remove(name)
         unmatched_right.remove(right_name)
@@ -239,10 +299,18 @@ def _append_auxiliary_rows(left: ModelSnapshot, right: ModelSnapshot, rows: List
             )
 
 
-def _compare_row(left: List[TensorInfo], right: List[TensorInfo], reason: str) -> MappingRow:
+def _compare_row(
+    left: List[TensorInfo],
+    right: List[TensorInfo],
+    reason: str,
+    ignore_quantization: bool = False,
+) -> MappingRow:
     status = "exact"
     detail = reason
-    if not _shape_equal(left, right):
+    quantization_ignored = ignore_quantization and _is_quantization_related(left, right)
+    if quantization_ignored:
+        detail = f"{reason}; quantization ignored"
+    elif not _shape_equal(left, right):
         status = "different"
         detail = f"{reason}; shape mismatch"
     elif not _dtype_equal(left, right):
@@ -260,10 +328,18 @@ def _compare_row(left: List[TensorInfo], right: List[TensorInfo], reason: str) -
     )
 
 
-def _compare_fused_row(left: List[TensorInfo], right: List[TensorInfo], reason: str) -> MappingRow:
-    status = "equivalent" if _shape_compatible(left, right) else "different"
+def _compare_fused_row(
+    left: List[TensorInfo],
+    right: List[TensorInfo],
+    reason: str,
+    ignore_quantization: bool = False,
+) -> MappingRow:
+    quantization_ignored = ignore_quantization and _is_quantization_related(left, right)
+    status = "equivalent" if quantization_ignored or _shape_compatible(left, right) else "different"
     detail = reason if status == "equivalent" else f"{reason}; shape mismatch"
-    if status == "equivalent" and not _dtype_equal(left, right):
+    if status == "equivalent" and quantization_ignored:
+        detail = f"{reason}; quantization ignored"
+    elif status == "equivalent" and not _dtype_equal(left, right):
         detail = f"{reason}; dtype differs"
     return MappingRow(
         left=left,
@@ -283,6 +359,16 @@ def _dtype_equal(left: Sequence[TensorInfo], right: Sequence[TensorInfo]) -> boo
     left_dtypes = {tensor.dtype for tensor in left}
     right_dtypes = {tensor.dtype for tensor in right}
     return left_dtypes == right_dtypes
+
+
+def _is_quantization_related(left: Sequence[TensorInfo], right: Sequence[TensorInfo]) -> bool:
+    tensors = list(left) + list(right)
+    return any(
+        tensor.kind == "quant_aux"
+        or tensor.dtype in {"int4", "uint4", "int8", "i8", "uint8", "u8", "fp8", "f8_e4m3", "f8_e5m2"}
+        or tensor.name.endswith((".qweight", ".packed_weight"))
+        for tensor in tensors
+    )
 
 
 def _shape_compatible(left: Sequence[TensorInfo], right: Sequence[TensorInfo]) -> bool:

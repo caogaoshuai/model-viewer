@@ -82,6 +82,10 @@ def render_diff(diff: ModelDiff, views: Sequence[str], output_format: str, layer
             {
                 "left": diff.left.to_dict(),
                 "right": diff.right.to_dict(),
+                "options": {
+                    "fuzzy_match": diff.fuzzy_match,
+                    "ignore_quantization": diff.ignore_quantization,
+                },
                 "summary": diff.summary(),
                 "rows": [
                     {
