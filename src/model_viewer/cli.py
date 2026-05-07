@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = subparsers.add_parser("show", help="Render one model.")
     show.add_argument("model")
-    show.add_argument("--view", default="overview", help="all or comma list: overview,heatmap,detail,mapping,memory,tree")
+    show.add_argument("--view", default="overview", help="all or comma list: overview,heatmap,detail,mapping,memory,tree,patterns")
     show.add_argument("--format", choices=["term", "markdown", "mermaid", "drawio", "html", "json"], default="term")
     show.add_argument("--layer", type=int, default=0)
     show.add_argument("-o", "--output")
@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     diff = subparsers.add_parser("diff", help="Compare two models.")
     diff.add_argument("left")
     diff.add_argument("right")
-    diff.add_argument("--view", default="all", help="all or comma list: overview,heatmap,detail,mapping,memory,tree")
+    diff.add_argument("--view", default="all", help="all or comma list: overview,heatmap,detail,mapping,memory,tree,patterns")
     diff.add_argument("--format", choices=["term", "markdown", "mermaid", "drawio", "html", "json"], default="term")
     diff.add_argument("--layer", type=int, default=0)
     diff.add_argument("--fuzzy-match", action="store_true", help="Detect fused qkv/gate_up and tied lm_head mappings.")

@@ -6,10 +6,11 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .diff import MappingRow, ModelDiff
 from .formatting import format_bytes, format_params, json_dumps, markdown_table, pct_delta, shape_text
+from .key_patterns import fold_key_patterns
 from .schema import ModelSnapshot, TensorInfo, dtype_nbytes
 
 
-VIEW_ORDER = ("overview", "heatmap", "detail", "mapping", "memory", "tree")
+VIEW_ORDER = ("overview", "heatmap", "detail", "mapping", "memory", "tree", "patterns")
 MODULES = ("embed", "ln1", "q_proj", "k_proj", "v_proj", "o_proj", "ln2", "gate", "up", "down")
 STATUS_GLYPHS = {
     "exact": "░",
@@ -38,6 +39,8 @@ def render_show(snapshot: ModelSnapshot, views: Sequence[str], output_format: st
     if output_format == "mermaid":
         return render_overview_mermaid(snapshot)
     if output_format == "drawio":
+        if "patterns" in views:
+            return render_key_patterns_drawio(snapshot)
         return render_overview_drawio(snapshot)
 
     sections: List[Tuple[str, str]] = []
@@ -50,6 +53,8 @@ def render_show(snapshot: ModelSnapshot, views: Sequence[str], output_format: st
             sections.append(("Memory Footprint", render_memory(snapshot)))
         elif view == "tree":
             sections.append(("Raw Tree", render_tree(snapshot)))
+        elif view == "patterns":
+            sections.append(("Safetensor Key Patterns", render_key_patterns(snapshot)))
         elif view in {"heatmap", "mapping"}:
             sections.append((view.title(), f"{view} is available for diff output."))
     return _join_sections(sections, output_format)
@@ -78,6 +83,8 @@ def render_diff(diff: ModelDiff, views: Sequence[str], output_format: str, layer
     if output_format == "mermaid":
         return render_diff_overview_mermaid(diff)
     if output_format == "drawio":
+        if "patterns" in views:
+            return render_diff_key_patterns_drawio(diff)
         return render_diff_drawio(diff)
 
     sections: List[Tuple[str, str]] = []
@@ -95,6 +102,9 @@ def render_diff(diff: ModelDiff, views: Sequence[str], output_format: str, layer
         elif view == "tree":
             sections.append((f"Raw Tree: {diff.left.name}", render_tree(diff.left)))
             sections.append((f"Raw Tree: {diff.right.name}", render_tree(diff.right)))
+        elif view == "patterns":
+            sections.append((f"Safetensor Key Patterns: {diff.left.name}", render_key_patterns(diff.left)))
+            sections.append((f"Safetensor Key Patterns: {diff.right.name}", render_key_patterns(diff.right)))
     return _join_sections(sections, output_format)
 
 
@@ -163,6 +173,38 @@ def render_diff_drawio(diff: ModelDiff) -> str:
             (diff.right.name, _model_brief(diff.right)),
         ],
     )
+
+
+def render_key_patterns(snapshot: ModelSnapshot, limit: int = 240) -> str:
+    patterns = fold_key_patterns(snapshot)
+    lines = [
+        f"Safetensor Key Folding [{len(snapshot.tensors)} keys -> {len(patterns)} patterns]",
+    ]
+    shown = patterns[:limit]
+    for idx, pattern in enumerate(shown):
+        branch = "└──" if idx == len(shown) - 1 and len(patterns) <= limit else "├──"
+        suffix = f"x{pattern.count}"
+        if pattern.shape:
+            suffix += f"  {shape_text(pattern.shape)}"
+        if pattern.dtype and pattern.dtype != "unknown":
+            suffix += f"  {pattern.dtype}"
+        lines.append(f"{branch} {pattern.pattern}  {suffix}")
+    if len(patterns) > limit:
+        lines.append(f"└── ... {len(patterns) - limit} more patterns")
+    return "\n".join(lines)
+
+
+def render_key_patterns_drawio(snapshot: ModelSnapshot) -> str:
+    nodes = _pattern_nodes(snapshot, limit=12)
+    return _drawio_xml(f"Safetensor key folding: {snapshot.name}", nodes)
+
+
+def render_diff_key_patterns_drawio(diff: ModelDiff) -> str:
+    nodes = [
+        (diff.left.name, f"{len(diff.left.tensors)} keys, {len(fold_key_patterns(diff.left))} patterns"),
+        (diff.right.name, f"{len(diff.right.tensors)} keys, {len(fold_key_patterns(diff.right))} patterns"),
+    ]
+    return _drawio_xml(f"Safetensor key folding: {diff.left.name} vs {diff.right.name}", nodes)
 
 
 def render_heatmap(diff: ModelDiff) -> str:
@@ -553,3 +595,15 @@ def _drawio_xml(title: str, nodes: Sequence[Tuple[str, str]]) -> str:
         f'<mxGraphModel><root>{content}</root></mxGraphModel>'
         "</diagram></mxfile>"
     )
+
+
+def _pattern_nodes(snapshot: ModelSnapshot, limit: int) -> List[Tuple[str, str]]:
+    nodes = []
+    for pattern in fold_key_patterns(snapshot)[:limit]:
+        detail = f"x{pattern.count}"
+        if pattern.shape:
+            detail += f" {shape_text(pattern.shape)}"
+        if pattern.dtype and pattern.dtype != "unknown":
+            detail += f" {pattern.dtype}"
+        nodes.append((pattern.pattern, detail))
+    return nodes or [("No tensor keys", "")]

@@ -17,7 +17,7 @@
 | 能力 | 说明 |
 |---|---|
 | 字符 tree + 折叠语法 | 精确表达每一层 / 每个 tensor 的 shape、dtype、参数量；同构层自动折叠 |
-| 多视图渲染 | Overview（Mermaid）/ Heatmap / Layer Detail / Key Mapping / Memory / Raw Tree 共 6 种视图 |
+| 多视图渲染 | Overview / Heatmap / Layer Detail / Key Mapping / Memory / Raw Tree / Key Patterns |
 | 多维度 Diff | 结构 / 命名 / 参数量 / 异构层 / 显存 五个维度对比 |
 | 量化感知 | 自动识别 GPTQ / AWQ / fp8 / LoRA 的辅助 tensor，归属到主 weight |
 | MoE / 混合注意力 | 专家组折叠、State Cache 估算、`[A]/[L]` 层标记 |
@@ -69,6 +69,9 @@ mad snapshot /path/to/model -o model.snapshot.json
 
 # 5. 估算部署侧显存，包含 KV cache
 mad memory /path/to/model --mode deploy --seq-len 40960 --batch-size 1
+
+# 6. 展示 safetensors key 折叠图
+mad show /path/to/model --view patterns --format markdown
 ```
 
 ### 对比 Qwen3-0.6B 和 Qwen3-1.7B
@@ -103,6 +106,7 @@ mad diff \
 | `--view mapping` | key 映射表，显示 exact、fused、tied、left-only、right-only |
 | `--view memory` | 权重和 KV cache 显存估算 |
 | `--view tree` | 折叠后的结构树 |
+| `--view patterns` | safetensors key 折叠图，把数字变化位置折叠成 `{0..N}` |
 | `--view all` | 输出所有核心视图 |
 | `--format markdown` | 适合写报告或贴文档 |
 | `--format json` | 适合 CI 消费 |
@@ -119,3 +123,20 @@ mad diff \
 | 结构 Diff | exact / dtype / shape / left-only / right-only |
 | Fuzzy 对账 | qkv fuse、gate/up fuse、tied embedding、量化辅助 tensor |
 | 输出格式 | term / markdown / mermaid / draw.io XML / html / json |
+
+### safetensors key 折叠图
+
+`patterns` 视图会按 key 中纯数字 token 的变化位置自动折叠，适合快速确认层、专家、分片等重复结构：
+
+```text
+原始 key:
+model.layers.0.mlp.experts.0.weight
+model.layers.0.mlp.experts.1.weight
+...
+model.layers.0.mlp.experts.63.weight
+
+折叠后:
+model.layers.{0}.mlp.experts.{0..63}.weight  x64
+```
+
+连续数字会显示成 `{0..63}`；固定数字但属于同一折叠组时显示成 `{0}`；不连续数字会显示成 `{0..3,28..31}`。

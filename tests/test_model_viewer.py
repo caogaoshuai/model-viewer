@@ -2,8 +2,10 @@ from pathlib import Path
 import unittest
 
 from model_viewer.diff import compare_models
+from model_viewer.key_patterns import fold_key_patterns
 from model_viewer.parsing import load_model
 from model_viewer.rendering import render_diff, render_show
+from model_viewer.schema import ModelSnapshot, TensorInfo
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -40,6 +42,24 @@ class ModelViewerTest(unittest.TestCase):
         self.assertIn("Heatmap", report)
         self.assertIn("Key Mapping", report)
         self.assertIn("Memory Footprint", report)
+
+    def test_key_patterns_fold_numeric_positions(self):
+        snapshot = ModelSnapshot(
+            name="moe",
+            source="fixture",
+            tensors=[
+                TensorInfo(name=f"model.layers.0.mlp.experts.{idx}.weight", shape=(8, 4), dtype="bf16")
+                for idx in range(4)
+            ],
+        )
+
+        patterns = fold_key_patterns(snapshot)
+        self.assertEqual(len(patterns), 1)
+        self.assertEqual(patterns[0].pattern, "model.layers.{0}.mlp.experts.{0..3}.weight")
+        self.assertEqual(patterns[0].count, 4)
+        rendered = render_show(snapshot, ["patterns"], "markdown")
+        self.assertIn("Safetensor Key Patterns", rendered)
+        self.assertIn("model.layers.{0}.mlp.experts.{0..3}.weight", rendered)
 
 
 if __name__ == "__main__":

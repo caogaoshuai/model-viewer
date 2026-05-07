@@ -67,6 +67,33 @@ mad show /path/to/model --view detail --layer 0 --format markdown
 mad show /path/to/model --view overview --format drawio -o model.drawio.xml
 ```
 
+输出 safetensors key 折叠图：
+
+```bash
+mad show /path/to/model --view patterns --format markdown
+```
+
+`patterns` 视图按 key 中纯数字 token 的变化位置自动折叠。例如：
+
+```text
+原始:
+model.layers.0.mlp.experts.0.weight
+model.layers.0.mlp.experts.1.weight
+...
+model.layers.0.mlp.experts.63.weight
+
+折叠:
+model.layers.{0}.mlp.experts.{0..63}.weight  x64
+```
+
+规则：
+
+- 只有纯数字分段会折叠，例如 `layers.0`、`experts.63`。
+- 连续数字显示为 `{start..end}`。
+- 固定数字但属于同一折叠组时显示为 `{0}`。
+- 不连续数字显示为 `{0..3,28..31}`。
+- shape 或 dtype 不同时会拆成不同折叠组，避免隐藏真实结构差异。
+
 ## 4. 对比两个模型
 
 基础对比：
@@ -172,6 +199,16 @@ mad diff \
   --format markdown
 ```
 
+查看两侧 safetensors key 折叠图：
+
+```bash
+mad diff \
+  ~/Documents/project/Qwen3-0.6B \
+  ~/Documents/project/Qwen3-1.7B/model.safetensors.index.json \
+  --view patterns \
+  --format markdown
+```
+
 ## 8. 输出解读
 
 | 状态 | 含义 |
@@ -182,6 +219,15 @@ mad diff \
 | `left_only` | 只存在于左侧模型 |
 | `right_only` | 只存在于右侧模型 |
 | `auxiliary` | 量化辅助 tensor |
+
+key 折叠图字段：
+
+| 字段 | 含义 |
+|---|---|
+| `Safetensor Key Folding [311 keys -> 13 patterns]` | 原始 key 数和折叠后的模式数 |
+| `model.layers.{0..27}.self_attn.q_proj.weight` | 数字位置折叠后的 key 模式 |
+| `x28` | 该模式覆盖的真实 key 数 |
+| `[2048,1024] BF16` | 该组 tensor 的 shape 和 dtype |
 
 热力图符号：
 
