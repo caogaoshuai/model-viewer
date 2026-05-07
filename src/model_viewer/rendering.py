@@ -401,6 +401,7 @@ def render_key_patterns_diff(diff: ModelDiff, limit: int = 120) -> str:
             for name in ("exact", "equivalent", "dtype", "shape_or_count", "left_only", "right_only")
         ),
     ]
+    lines.extend(_pattern_diff_explanation(summary))
     if not rows:
         lines.append("No pattern-level differences.")
         return "\n".join(lines)
@@ -415,6 +416,41 @@ def render_key_patterns_diff(diff: ModelDiff, limit: int = 120) -> str:
         lines.append(f"\n... {len(rows) - limit} more pattern differences hidden")
     lines.append("\nUse `mad show <model> --view patterns` to inspect a full folded tree for one side.")
     return "\n".join(lines)
+
+
+def _pattern_diff_explanation(summary: Dict[str, int]) -> List[str]:
+    exact = summary.get("exact", 0)
+    equivalent = summary.get("equivalent", 0)
+    dtype = summary.get("dtype", 0)
+    shape_or_count = summary.get("shape_or_count", 0)
+    left_only = summary.get("left_only", 0)
+    right_only = summary.get("right_only", 0)
+    structural = shape_or_count + left_only + right_only
+    lines = [
+        "Interpretation:",
+        f"- exact={exact}: folded key patterns match exactly.",
+        f"- equivalent={equivalent}: different storage layout, same logical tensors after known fuse/split or expert packing.",
+        f"- dtype={dtype}: same key pattern and shape/count, but stored dtype differs.",
+    ]
+    if structural:
+        lines.append(
+            f"- shape_or_count={shape_or_count}, left_only={left_only}, right_only={right_only}: potential real structural or naming differences."
+        )
+    else:
+        lines.append(
+            "- shape_or_count=0, left_only=0, right_only=0: no unmatched structural or naming pattern remains."
+        )
+    if structural:
+        lines.append(
+            f"Conclusion: review required; {structural} pattern(s) are not explained by known equivalent layouts or dtype-only changes."
+        )
+    elif equivalent or dtype:
+        lines.append(
+            "Conclusion: no unmatched pattern remains; differences are storage-layout equivalents and/or dtype-only changes."
+        )
+    else:
+        lines.append("Conclusion: folded safetensors key patterns are identical.")
+    return lines
 
 
 def _pattern_diff_rows(

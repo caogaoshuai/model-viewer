@@ -343,6 +343,12 @@ mad diff \
 - 常见融合/拆分等价关系，例如 `in_proj_qkv + in_proj_z -> in_proj_qkvz`、`in_proj_a + in_proj_b -> in_proj_ba`、MoE `gate_proj + up_proj -> gate_up_proj`。
 - MoE expert 维度从 `experts.{0..255}.*.weight` 展开到 `[256,...]` 打包 tensor 的差异。
 
+报告会自带 `Interpretation` 小节：
+
+- `equivalent` 表示存储布局不同，但经过已知融合/拆分或 expert 打包后是同一组逻辑权重。
+- `dtype` 表示 key 模式、数量和 shape 一致，只是保存精度不同。
+- `shape_or_count`、`left_only`、`right_only` 才需要重点排查，通常代表真实结构或命名差异。
+
 查看两侧字符结构图：
 
 ```bash

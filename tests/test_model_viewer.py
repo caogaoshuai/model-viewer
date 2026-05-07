@@ -216,6 +216,10 @@ class ModelViewerTest(unittest.TestCase):
         rendered = render_diff(diff, ["patterns"], "markdown")
 
         self.assertIn("Safetensor Key Pattern Diff", rendered)
+        self.assertIn("Interpretation:", rendered)
+        self.assertIn("different storage layout, same logical tensors", rendered)
+        self.assertIn("same key pattern and shape/count, but stored dtype differs", rendered)
+        self.assertIn("Conclusion: no unmatched pattern remains", rendered)
         self.assertIn("linear_attn fusion: in_proj_qkv + in_proj_z -> in_proj_qkvz", rendered)
         self.assertIn("linear_attn fusion: in_proj_b + in_proj_a -> in_proj_ba", rendered)
         self.assertIn("MoE expert fusion: expert gate_proj + up_proj -> gate_up_proj", rendered)
