@@ -21,41 +21,94 @@
 | 多维度 Diff | 结构 / 命名 / 参数量 / 异构层 / 显存 五个维度对比 |
 | 量化感知 | 自动识别 GPTQ / AWQ / fp8 / LoRA 的辅助 tensor，归属到主 weight |
 | MoE / 混合注意力 | 专家组折叠、State Cache 估算、`[A]/[L]` 层标记 |
-| 跨格式输出 | term / markdown / mermaid / svg / html / json |
-| 显存联动 | 复用 `training-resource-estimator` 估算训练 / 推理显存 |
+| 跨格式输出 | term / markdown / mermaid / draw.io XML / html / json |
+| 显存估算 | 基于模型参数、dtype、KV cache 配置估算权重与推理显存 |
 
-## CLI 草案
+## 使用说明
+
+更完整的命令说明、输入格式、输出解释和常见场景见 [`docs/usage.md`](./docs/usage.md)。
+
+### 安装与运行
 
 ```bash
-mad show <model> [--view all|overview|tree|heatmap|memory|...]
-mad diff <model_a> <model_b> [--view ...] [--fuzzy-match]
-mad snapshot <model> -o snap.json
-mad memory <model> [--mode train|deploy]
+# 方式 1：仓库内直接运行，无需安装
+./mad --help
+
+# 方式 2：安装为 mad 命令
+python3 -m pip install -e .
+mad --help
 ```
 
-## 快速开始
+### 支持的输入
+
+| 输入 | 示例 | 适合场景 |
+|---|---|---|
+| 模型目录 | `/path/to/Qwen3-0.6B` | 目录里有 `config.json`、`.safetensors` 或 index |
+| 配置文件 | `/path/to/config.json` | 只做结构级对比，速度最快 |
+| safetensors 文件 | `/path/to/model.safetensors` | 从 header 读取真实 tensor key、shape、dtype |
+| safetensors index | `/path/to/model.safetensors.index.json` | 对比权重 key 集合，不下载大 shard |
+| 快照 JSON | `model.snapshot.json` | CI 或离线回归对比 |
+| 远程模型 ID | `hf://Qwen/Qwen3-0.6B`、`ms://Qwen/Qwen3-1.7B` | 需要安装 `model-viewer[hub]` |
+
+如果只有 `config.json`，工具会按配置合成结构 tensor，这适合看层数、hidden size、MLP size、参数量和显存估算；如果要确认真实权重 key 或 dtype，请提供 `.safetensors` 或 index。
+
+### 常用命令
 
 ```bash
-# 仓库内直接运行
-./mad show tests/fixtures/model_a --view overview --format mermaid
-
-# 或安装为 mad 命令
-python3 -m pip install -e .
-
-# 展示单模型结构：支持本地模型目录、config.json、safetensors/index、snapshot JSON
+# 1. 展示单模型结构，输出 Markdown
 mad show /path/to/model --view overview,tree,memory --format markdown
 
-# 对比训练态与部署态；fuzzy-match 会识别 qkv/gate_up fuse、量化辅助 tensor、tied lm_head
-mad diff /train/model /deploy/model --view all --fuzzy-match -o train-vs-deploy.md
+# 2. 只输出 Mermaid 结构图，适合贴到文档
+mad show /path/to/model --view overview --format mermaid
 
-# 导出离线快照给 CI 或后续回归
+# 3. 对比两个模型，输出完整报告
+mad diff /path/to/model_a /path/to/model_b --view all --fuzzy-match -o model-diff.md
+
+# 4. 导出快照，后续可以离线 diff
 mad snapshot /path/to/model -o model.snapshot.json
 
-# CI 卡点：出现非 exact diff 时返回退出码 2
-mad diff baseline.json /path/to/model --format json --fail-on-change
+# 5. 估算部署侧显存，包含 KV cache
+mad memory /path/to/model --mode deploy --seq-len 40960 --batch-size 1
 ```
 
-当前实现是离线优先的轻量 CLI：
+### 对比 Qwen3-0.6B 和 Qwen3-1.7B
+
+```bash
+# 0.6B 如果没有 index，需要下载 model.safetensors 才能读取真实 key/shape/dtype
+modelscope download Qwen/Qwen3-0.6B \
+  config.json model.safetensors \
+  --local_dir ~/Documents/project/Qwen3-0.6B
+
+# 1.7B 有 index 时，只拉 config + index 即可做 key 集合检查
+modelscope download Qwen/Qwen3-1.7B \
+  --include config.json '*.safetensors.index.json' \
+  --local_dir ~/Documents/project/Qwen3-1.7B
+
+# 结构级对比：建议直接传 config.json，避免把未下载 shard 误判为缺 shape
+mad diff \
+  ~/Documents/project/Qwen3-0.6B/config.json \
+  ~/Documents/project/Qwen3-1.7B/config.json \
+  --view overview,memory,tree \
+  --format markdown \
+  -o ~/Documents/project/qwen3-0.6b-vs-1.7b.md
+```
+
+### 视图与输出格式
+
+| 参数 | 说明 |
+|---|---|
+| `--view overview` | Mermaid 模型框图 |
+| `--view heatmap` | diff 热力图，只用于 `mad diff` |
+| `--view detail --layer 0` | 单层模块形状对比 |
+| `--view mapping` | key 映射表，显示 exact、fused、tied、left-only、right-only |
+| `--view memory` | 权重和 KV cache 显存估算 |
+| `--view tree` | 折叠后的结构树 |
+| `--view all` | 输出所有核心视图 |
+| `--format markdown` | 适合写报告或贴文档 |
+| `--format json` | 适合 CI 消费 |
+| `--format drawio` | 输出 draw.io XML |
+
+### 当前实现状态
 
 | 能力 | 当前状态 |
 |---|---|
